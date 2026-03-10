@@ -1,0 +1,13 @@
+log:
+  level: info
+
+runner:
+  capacity: 1
+  timeout: 30m
+  labels:
+    - "ubuntu-latest:docker://catthehacker/ubuntu:act-latest"
+    - "ubuntu-22.04:docker://catthehacker/ubuntu:act-latest"
+
+container:
+  network: forgejo-net
+  docker_host: unix:///var/run/docker.sock

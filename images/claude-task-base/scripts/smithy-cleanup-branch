@@ -1,0 +1,16 @@
+#!/bin/sh
+# smithy-cleanup-branch — Remove .smithy/ files, commit, and push.
+#
+# Usage: smithy-cleanup-branch
+set -e
+
+echo "[smithy] Cleaning up .smithy/ files"
+git rm -rf .smithy 2>/dev/null || true
+if ! git diff --cached --quiet; then
+  git commit -m "Remove Smithy intermediate files"
+  echo "[smithy] Committed cleanup"
+else
+  echo "[smithy] No .smithy/ files to clean up"
+fi
+git push
+echo "[smithy] Cleanup complete"

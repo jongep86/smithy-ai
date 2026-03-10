@@ -1,0 +1,76 @@
+services:
+  forgejo:
+    image: codeberg.org/forgejo/forgejo:14
+    ports:
+      - "3000:3000"
+      - "2222:22"
+    volumes:
+      - forgejo-data:/data
+      - ./config/forgejo-extra-links.tmpl:/data/gitea/templates/custom/extra_links.tmpl:ro
+    environment:
+      - FORGEJO__webhook__ALLOWED_HOST_LIST=orchestrator
+      - FORGEJO__actions__ENABLED=true
+      - FORGEJO__ui__DEFAULT_SHOW_FULL_NAME=true
+    networks:
+      - forgejo-net
+
+  orchestrator:
+    build:
+      context: .
+      dockerfile: orchestrator/Dockerfile
+    ports:
+      - "8080:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./prompts:/prompts:ro
+    environment:
+      - FORGEJO_URL=${FORGEJO_URL:-http://forgejo:3000}
+      - FORGEJO_EXTERNAL_URL=${FORGEJO_EXTERNAL_URL:-http://localhost:3000}
+      - SMITHY_FORGEJO_TOKEN=${SMITHY_FORGEJO_TOKEN}
+      - ARCHITECT_FORGEJO_TOKEN=${ARCHITECT_FORGEJO_TOKEN:-}
+      - CLAUDE_CODE_OAUTH_TOKEN=${CLAUDE_CODE_OAUTH_TOKEN}
+      - DOCKER_NETWORK=${DOCKER_NETWORK:-forgejo-net}
+      - TASK_IMAGE=${TASK_IMAGE:-claude-task:latest}
+      - WEBHOOK_SECRET=${WEBHOOK_SECRET}
+    networks:
+      - forgejo-net
+    depends_on:
+      - forgejo
+
+  runner:
+    image: data.forgejo.org/forgejo/runner:12.7.1
+    user: "0"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - runner-data:/data
+      - ./config/runner-config.yml:/config/runner-config.yml:ro
+    environment:
+      - FORGEJO_URL=http://forgejo:3000
+      - RUNNER_TOKEN=${RUNNER_TOKEN}
+    entrypoint:
+      - sh
+      - -c
+      - |
+        forgejo-runner register \
+          --instance "$FORGEJO_URL" \
+          --token "$RUNNER_TOKEN" \
+          --name runner \
+          --labels "" \
+          --no-interactive; \
+        forgejo-runner daemon --config /config/runner-config.yml
+    networks:
+      - forgejo-net
+    depends_on:
+      - forgejo
+
+volumes:
+  forgejo-data:
+  cache-pnpm:
+  cache-maven:
+  cache-npm:
+  cache-gradle:
+  runner-data:
+
+networks:
+  forgejo-net:
+    name: forgejo-net

@@ -1,0 +1,12 @@
+#!/bin/sh
+# smithy-fetch-reset — Fetch a branch and hard-reset to it.
+#
+# Usage: smithy-fetch-reset <branch>
+set -e
+
+BRANCH="$1"
+
+echo "[smithy] Fetching and resetting to origin/$BRANCH"
+git fetch origin "$BRANCH"
+git reset --hard FETCH_HEAD
+echo "[smithy] Reset complete"

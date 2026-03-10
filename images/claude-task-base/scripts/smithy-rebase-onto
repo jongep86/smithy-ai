@@ -1,0 +1,21 @@
+#!/bin/sh
+# smithy-rebase-onto — Fetch, pull, rebase onto base branch, and force-push.
+#
+# Usage: smithy-rebase-onto <branch> <base-branch>
+set -e
+
+BRANCH="$1"
+BASE_BRANCH="$2"
+
+echo "[smithy] Ensuring branches are fetchable"
+git remote set-branches --add origin "$BRANCH"
+git remote set-branches --add origin "$BASE_BRANCH"
+
+echo "[smithy] Pulling latest changes"
+git pull --ff-only
+
+echo "[smithy] Rebasing onto origin/$BASE_BRANCH"
+git fetch --filter=blob:none origin "$BASE_BRANCH"
+git rebase "origin/$BASE_BRANCH"
+git push --force-with-lease
+echo "[smithy] Rebase complete"

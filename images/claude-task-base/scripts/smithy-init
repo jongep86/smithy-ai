@@ -1,0 +1,56 @@
+#!/bin/sh
+# smithy-init — Container startup initialization.
+# Configures git credentials, clones the repo (existing or new branch),
+# clones extra repos, and stays running via exec sleep infinity.
+#
+# Environment variables:
+#   FORGEJO_TOKEN   — Token for git credential helper
+#   GIT_EMAIL       — Git author email
+#   GIT_USERNAME    — Git author name
+#   CLONE_URL       — Repository clone URL
+#   BRANCH          — Target branch name
+#   SOURCE_BRANCH   — Base branch (for new branches)
+#   EXTRA_REPOS     — JSON array of [url, dir, branch] tuples (optional)
+set -e
+
+echo "[smithy] Configuring git credentials"
+git config --global credential.helper \
+  '!f() { echo username=token; echo "password=$FORGEJO_TOKEN"; }; f'
+git config --global user.email "$GIT_EMAIL"
+git config --global user.name "$GIT_USERNAME"
+git config --global push.autoSetupRemote true
+
+echo "[smithy] Cloning $CLONE_URL (branch: $BRANCH)"
+if git clone --filter=blob:none --single-branch --branch "$BRANCH" "$CLONE_URL" /workspace 2>/dev/null; then
+  cd /workspace
+  git remote set-branches --add origin "$SOURCE_BRANCH"
+  echo "[smithy] Checked out existing branch $BRANCH"
+else
+  git clone --filter=blob:none --single-branch --branch "$SOURCE_BRANCH" "$CLONE_URL" /workspace
+  cd /workspace
+  git checkout -b "$BRANCH"
+  git remote set-branches --add origin "$BRANCH"
+  echo "[smithy] Created new branch $BRANCH from $SOURCE_BRANCH"
+fi
+
+# Clone extra repositories (JSON array of [url, dir, branch] tuples)
+if [ -n "$EXTRA_REPOS" ] && [ "$EXTRA_REPOS" != "null" ]; then
+  echo "[smithy] Cloning extra repositories"
+  count=$(echo "$EXTRA_REPOS" | jq 'length')
+  i=0
+  while [ "$i" -lt "$count" ]; do
+    repo_url=$(echo "$EXTRA_REPOS" | jq -r ".[$i][0]")
+    repo_dir=$(echo "$EXTRA_REPOS" | jq -r ".[$i][1]")
+    repo_branch=$(echo "$EXTRA_REPOS" | jq -r ".[$i][2]")
+    echo "[smithy] Cloning $repo_url -> $repo_dir (branch: $repo_branch)"
+    git clone --filter=blob:none "$repo_url" "$repo_dir"
+    cd "$repo_dir"
+    git checkout -b "$repo_branch" || true
+    cd /workspace
+    i=$((i + 1))
+  done
+fi
+
+mkdir -p /tmp/smithy-labels
+echo "[smithy] Initialization complete"
+exec sleep infinity
