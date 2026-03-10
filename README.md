@@ -31,7 +31,7 @@ Smithy-AI coordinates multiple AI agents working alongside human developers thro
 
 ## Demo setup
 
-The `demo/` directory contains a Docker Compose stack that runs a local Forgejo instance with the orchestrator.
+The `demo/` directory contains a Docker Compose stack that runs a local Forgejo instance with the orchestrator. Install https://github.com/smithy-ai/forgejo-client first, it's a required dependency.
 
 ```bash
 cd demo

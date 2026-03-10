@@ -8,7 +8,6 @@ RUN chmod +x gradlew && ./gradlew --version --no-daemon
 
 # Layer 2: Dependencies (changes when build scripts change)
 COPY orchestrator/build.gradle.kts orchestrator/settings.gradle.kts ./
-COPY orchestrator/local-m2/ /root/.m2/repository/
 RUN ./gradlew dependencies --no-daemon
 
 # Layer 3: Build (changes when source changes)
