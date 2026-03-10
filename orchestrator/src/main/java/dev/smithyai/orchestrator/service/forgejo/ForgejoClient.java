@@ -5,15 +5,16 @@ import dev.smithyai.forgejoclient.ApiException;
 import dev.smithyai.forgejoclient.api.IssueApi;
 import dev.smithyai.forgejoclient.api.RepositoryApi;
 import dev.smithyai.forgejoclient.model.*;
-import dev.smithyai.orchestrator.service.forgejo.dto.LatestReviewResult;
+import dev.smithyai.orchestrator.service.vcs.IssueTrackerClient;
+import dev.smithyai.orchestrator.service.vcs.VcsClient;
+import dev.smithyai.orchestrator.service.vcs.dto.*;
 import java.net.URI;
-import java.time.OffsetDateTime;
 import java.util.*;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.web.client.RestClient;
 
 @Slf4j
-public class ForgejoClient {
+public class ForgejoClient implements VcsClient, IssueTrackerClient {
 
     private final String baseUrl;
     private final IssueApi issueApi;
@@ -60,36 +61,48 @@ public class ForgejoClient {
         }
     }
 
-    // ── Issues ──────────────────────────────────────────────
+    // ── IssueTrackerClient ───────────────────────────────────
 
-    public Issue getIssue(String owner, String repo, int number) {
-        return api(() -> issueApi.issueGetIssue(owner, repo, (long) number));
+    @Override
+    public IssueData getIssue(String owner, String repo, int number) {
+        Issue issue = api(() -> issueApi.issueGetIssue(owner, repo, (long) number));
+        return toIssueData(issue);
     }
 
-    public List<Comment> getIssueComments(String owner, String repo, int number) {
-        return api(() -> issueApi.issueGetComments(owner, repo, (long) number, null, null));
+    @Override
+    public List<CommentEntry> getIssueComments(String owner, String repo, int number) {
+        List<Comment> comments = api(() -> issueApi.issueGetComments(owner, repo, (long) number, null, null));
+        return comments.stream().map(this::toCommentEntry).toList();
     }
 
-    public List<Comment> getIssueCommentsSince(String owner, String repo, int number, OffsetDateTime since) {
-        return api(() -> issueApi.issueGetComments(owner, repo, (long) number, since, null));
-    }
-
-    public Comment createIssueComment(String owner, String repo, int number, String body) {
-        return api(() ->
+    @Override
+    public CommentEntry createIssueComment(String owner, String repo, int number, String body) {
+        Comment comment = api(() ->
             issueApi.issueCreateComment(owner, repo, (long) number, new CreateIssueCommentOption().body(body))
         );
+        return toCommentEntry(comment);
     }
 
-    // ── Attachments ─────────────────────────────────────────
-
-    public List<Attachment> getIssueAttachments(String owner, String repo, int number) {
-        return api(() -> issueApi.issueListIssueAttachments(owner, repo, (long) number));
+    @Override
+    public void setIssueAssignees(String owner, String repo, int issueNumber, List<String> assignees) {
+        var opt = new EditIssueOption();
+        opt.setAssignees(assignees);
+        apiVoid(() -> issueApi.issueEditIssue(owner, repo, (long) issueNumber, opt));
     }
 
-    public List<Attachment> getCommentAttachments(String owner, String repo, long commentId) {
-        return api(() -> issueApi.issueListIssueCommentAttachments(owner, repo, commentId));
+    @Override
+    public List<AttachmentInfo> getIssueAttachments(String owner, String repo, int number) {
+        List<Attachment> attachments = api(() -> issueApi.issueListIssueAttachments(owner, repo, (long) number));
+        return attachments.stream().map(this::toAttachmentInfo).toList();
     }
 
+    @Override
+    public List<AttachmentInfo> getCommentAttachments(String owner, String repo, long commentId) {
+        List<Attachment> attachments = api(() -> issueApi.issueListIssueCommentAttachments(owner, repo, commentId));
+        return attachments.stream().map(this::toAttachmentInfo).toList();
+    }
+
+    @Override
     public byte[] downloadAttachment(String downloadUrl) {
         // Rewrite host to internal Forgejo URL
         URI publicUri = URI.create(downloadUrl);
@@ -101,9 +114,10 @@ public class ForgejoClient {
         return rest.get().uri(URI.create(internalUrl)).retrieve().body(byte[].class);
     }
 
-    // ── Pull Requests ───────────────────────────────────────
+    // ── VcsClient: Pull Requests ─────────────────────────────
 
-    public PullRequest createPullRequest(
+    @Override
+    public PrData createPullRequest(
         String owner,
         String repo,
         String title,
@@ -118,31 +132,80 @@ public class ForgejoClient {
         opt.setHead(head);
         opt.setBase(base);
         opt.setBody(body);
-        return api(() -> repoApi.repoCreatePullRequest(owner, repo, opt));
+        PullRequest pr = api(() -> repoApi.repoCreatePullRequest(owner, repo, opt));
+        return toPrData(pr);
     }
 
-    public PullRequest getPullRequest(String owner, String repo, int number) {
-        return api(() -> repoApi.repoGetPullRequest(owner, repo, (long) number));
+    @Override
+    public PrData getPullRequest(String owner, String repo, int number) {
+        PullRequest pr = api(() -> repoApi.repoGetPullRequest(owner, repo, (long) number));
+        return toPrData(pr);
     }
 
-    public List<PullReviewComment> getPrComments(String owner, String repo, int prNumber) {
-        List<PullReview> reviews = api(() -> repoApi.repoListPullReviews(owner, repo, (long) prNumber, null, null));
-        var comments = new ArrayList<PullReviewComment>();
-        for (var review : reviews) {
-            long reviewId = review.getId();
-            try {
-                comments.addAll(getReviewComments(owner, repo, prNumber, reviewId));
-            } catch (Exception e) {
-                log.warn("Failed to fetch comments for review {}", reviewId, e);
+    @Override
+    public PrData findPrByHead(String owner, String repo, String head) {
+        List<PullRequest> prs = api(() ->
+            repoApi.repoListPullRequests(owner, repo, "open", null, null, null, null, null, null)
+        );
+        for (var pr : prs) {
+            if (pr.getHead() != null && head.equals(pr.getHead().getRef())) {
+                return toPrData(pr);
             }
         }
-        return comments;
+        return null;
     }
 
-    public List<PullReviewComment> getReviewComments(String owner, String repo, int prNumber, long reviewId) {
-        return api(() -> repoApi.repoGetPullReviewComments(owner, repo, (long) prNumber, reviewId));
+    @Override
+    public void createPrComment(String owner, String repo, int prNumber, String body) {
+        // In Forgejo, PRs are issues — PR comments go through the issue comment API
+        api(() ->
+            issueApi.issueCreateComment(owner, repo, (long) prNumber, new CreateIssueCommentOption().body(body))
+        );
     }
 
+    // ── VcsClient: Reviews ───────────────────────────────────
+
+    @Override
+    public void createPullReview(
+        String owner,
+        String repo,
+        int prNumber,
+        String body,
+        String event,
+        List<InlineComment> comments
+    ) {
+        var opt = new CreatePullReviewOptions();
+        opt.setBody(body);
+        opt.setEvent(event != null ? event : "COMMENT");
+        if (comments != null && !comments.isEmpty()) {
+            var reviewComments = new ArrayList<CreatePullReviewComment>();
+            for (var c : comments) {
+                var rc = new CreatePullReviewComment();
+                rc.setPath(c.path());
+                rc.setBody(c.body());
+                rc.setNewPosition(c.newPosition());
+                reviewComments.add(rc);
+            }
+            opt.setComments(reviewComments);
+        }
+        apiVoid(() -> repoApi.repoCreatePullReview(owner, repo, (long) prNumber, opt));
+    }
+
+    @Override
+    public List<ReviewEntry> getPrReviews(String owner, String repo, int prNumber) {
+        List<PullReview> reviews = api(() -> repoApi.repoListPullReviews(owner, repo, (long) prNumber, null, null));
+        return reviews.stream().map(this::toReviewEntry).toList();
+    }
+
+    @Override
+    public List<ReviewCommentEntry> getReviewComments(String owner, String repo, int prNumber, long reviewId) {
+        List<PullReviewComment> comments = api(() ->
+            repoApi.repoGetPullReviewComments(owner, repo, (long) prNumber, reviewId)
+        );
+        return comments.stream().map(this::toReviewCommentEntry).toList();
+    }
+
+    @Override
     public LatestReviewResult getLatestReviewComments(String owner, String repo, int prNumber, String reviewer) {
         List<PullReview> reviews = api(() -> repoApi.repoListPullReviews(owner, repo, (long) prNumber, null, null));
 
@@ -162,14 +225,15 @@ public class ForgejoClient {
         return new LatestReviewResult(comments, reviewBody);
     }
 
-    // ── Assignees & Reviewers ────────────────────────────────
+    // ── VcsClient: Assignees & Reviewers ─────────────────────
 
-    public void setIssueAssignees(String owner, String repo, int issueNumber, List<String> assignees) {
-        var opt = new EditIssueOption();
-        opt.setAssignees(assignees);
-        apiVoid(() -> issueApi.issueEditIssue(owner, repo, (long) issueNumber, opt));
+    @Override
+    public void setPrAssignees(String owner, String repo, int prNumber, List<String> assignees) {
+        // In Forgejo, PR assignees are set via the issue API
+        setIssueAssignees(owner, repo, prNumber, assignees);
     }
 
+    @Override
     public void requestReview(String owner, String repo, int prNumber, List<String> reviewers) {
         apiVoid(() ->
             repoApi.repoCreatePullReviewRequests(
@@ -181,53 +245,15 @@ public class ForgejoClient {
         );
     }
 
+    @Override
     public boolean isAssigned(String owner, String repo, int prNumber, String username) {
         var pr = getPullRequest(owner, repo, prNumber);
-        return (
-            pr.getAssignees() != null &&
-            pr
-                .getAssignees()
-                .stream()
-                .anyMatch(a -> username.equals(a.getLogin()))
-        );
+        return pr.assignees() != null && pr.assignees().contains(username);
     }
 
-    // ── Reviews ─────────────────────────────────────────────
+    // ── VcsClient: Repository ────────────────────────────────
 
-    public void createPullReview(
-        String owner,
-        String repo,
-        int prNumber,
-        String body,
-        String event,
-        List<Map<String, Object>> comments
-    ) {
-        var opt = new CreatePullReviewOptions();
-        opt.setBody(body);
-        opt.setEvent(event != null ? event : "COMMENT");
-        if (comments != null && !comments.isEmpty()) {
-            var reviewComments = new ArrayList<CreatePullReviewComment>();
-            for (var c : comments) {
-                var rc = new CreatePullReviewComment();
-                rc.setPath((String) c.get("path"));
-                rc.setBody((String) c.get("body"));
-                Object pos = c.get("new_position");
-                if (pos instanceof Number n) {
-                    rc.setNewPosition(n.longValue());
-                }
-                reviewComments.add(rc);
-            }
-            opt.setComments(reviewComments);
-        }
-        apiVoid(() -> repoApi.repoCreatePullReview(owner, repo, (long) prNumber, opt));
-    }
-
-    public List<PullReview> getPrReviews(String owner, String repo, int prNumber) {
-        return api(() -> repoApi.repoListPullReviews(owner, repo, (long) prNumber, null, null));
-    }
-
-    // ── Repository ──────────────────────────────────────────
-
+    @Override
     public boolean repoExists(String owner, String repo) {
         try {
             api(() -> repoApi.repoGet(owner, repo));
@@ -238,17 +264,89 @@ public class ForgejoClient {
         }
     }
 
-    // ── Queries ─────────────────────────────────────────────
+    // ── VcsClient: URL helpers ───────────────────────────────
 
-    public PullRequest findPrByHead(String owner, String repo, String head) {
-        List<PullRequest> prs = api(() ->
-            repoApi.repoListPullRequests(owner, repo, "open", null, null, null, null, null, null)
+    @Override
+    public String fileBrowseUrl(String repoHtmlUrl, String branch, String path) {
+        return repoHtmlUrl + "/src/branch/" + branch + "/" + path;
+    }
+
+    @Override
+    public String prUrl(String externalBaseUrl, String owner, String repo, int number) {
+        return externalBaseUrl + "/" + owner + "/" + repo + "/pulls/" + number;
+    }
+
+    @Override
+    public String baseUrl() {
+        return baseUrl;
+    }
+
+    // ── DTO conversion helpers ───────────────────────────────
+
+    private IssueData toIssueData(Issue issue) {
+        List<String> assigneeLogins = issue.getAssignees() != null
+            ? issue.getAssignees().stream().map(User::getLogin).toList()
+            : List.of();
+        List<String> labelNames = issue.getLabels() != null
+            ? issue.getLabels().stream().map(Label::getName).toList()
+            : List.of();
+        return new IssueData(
+            issue.getNumber().intValue(),
+            issue.getTitle(),
+            issue.getBody(),
+            issue.getState() != null ? issue.getState().getValue() : "open",
+            assigneeLogins,
+            issue.getRef(),
+            labelNames
         );
-        for (var pr : prs) {
-            if (pr.getHead() != null && head.equals(pr.getHead().getRef())) {
-                return pr;
-            }
-        }
-        return null;
+    }
+
+    private PrData toPrData(PullRequest pr) {
+        List<String> assigneeLogins = pr.getAssignees() != null
+            ? pr.getAssignees().stream().map(User::getLogin).toList()
+            : List.of();
+        return new PrData(
+            pr.getNumber().intValue(),
+            pr.getTitle() != null ? pr.getTitle() : "",
+            pr.getBody() != null ? pr.getBody() : "",
+            Boolean.TRUE.equals(pr.getMerged()),
+            pr.getHead() != null ? pr.getHead().getRef() : "",
+            pr.getBase() != null ? pr.getBase().getRef() : "",
+            assigneeLogins
+        );
+    }
+
+    private CommentEntry toCommentEntry(Comment comment) {
+        return new CommentEntry(
+            comment.getId(),
+            comment.getUser() != null ? comment.getUser().getLogin() : "",
+            comment.getBody(),
+            comment.getCreatedAt()
+        );
+    }
+
+    private AttachmentInfo toAttachmentInfo(Attachment attachment) {
+        return new AttachmentInfo(attachment.getId(), attachment.getName(), attachment.getBrowserDownloadUrl());
+    }
+
+    private ReviewEntry toReviewEntry(PullReview review) {
+        return new ReviewEntry(
+            review.getId(),
+            review.getUser() != null ? review.getUser().getLogin() : "",
+            review.getBody() != null ? review.getBody() : "",
+            review.getState() != null ? review.getState() : "",
+            review.getCommitId() != null ? review.getCommitId() : "",
+            review.getSubmittedAt()
+        );
+    }
+
+    private ReviewCommentEntry toReviewCommentEntry(PullReviewComment comment) {
+        return new ReviewCommentEntry(
+            comment.getUser() != null ? comment.getUser().getLogin() : "",
+            comment.getBody(),
+            comment.getPath() != null ? comment.getPath() : "",
+            comment.getPosition() != null ? comment.getPosition() : 0,
+            comment.getCreatedAt()
+        );
     }
 }
