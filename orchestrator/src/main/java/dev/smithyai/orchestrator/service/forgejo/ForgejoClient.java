@@ -158,9 +158,7 @@ public class ForgejoClient implements VcsClient, IssueTrackerClient {
     @Override
     public void createPrComment(String owner, String repo, int prNumber, String body) {
         // In Forgejo, PRs are issues — PR comments go through the issue comment API
-        api(() ->
-            issueApi.issueCreateComment(owner, repo, (long) prNumber, new CreateIssueCommentOption().body(body))
-        );
+        api(() -> issueApi.issueCreateComment(owner, repo, (long) prNumber, new CreateIssueCommentOption().body(body)));
     }
 
     // ── VcsClient: Reviews ───────────────────────────────────
@@ -284,17 +282,15 @@ public class ForgejoClient implements VcsClient, IssueTrackerClient {
     // ── DTO conversion helpers ───────────────────────────────
 
     private IssueData toIssueData(Issue issue) {
-        List<String> assigneeLogins = issue.getAssignees() != null
-            ? issue.getAssignees().stream().map(User::getLogin).toList()
-            : List.of();
-        List<String> labelNames = issue.getLabels() != null
-            ? issue.getLabels().stream().map(Label::getName).toList()
-            : List.of();
+        List<String> assigneeLogins =
+            issue.getAssignees() != null ? issue.getAssignees().stream().map(User::getLogin).toList() : List.of();
+        List<String> labelNames =
+            issue.getLabels() != null ? issue.getLabels().stream().map(Label::getName).toList() : List.of();
         return new IssueData(
             issue.getNumber().intValue(),
             issue.getTitle(),
             issue.getBody(),
-            issue.getState() != null ? issue.getState().getValue() : "open",
+            issue.getState() != null ? issue.getState() : "open",
             assigneeLogins,
             issue.getRef(),
             labelNames
@@ -302,9 +298,8 @@ public class ForgejoClient implements VcsClient, IssueTrackerClient {
     }
 
     private PrData toPrData(PullRequest pr) {
-        List<String> assigneeLogins = pr.getAssignees() != null
-            ? pr.getAssignees().stream().map(User::getLogin).toList()
-            : List.of();
+        List<String> assigneeLogins =
+            pr.getAssignees() != null ? pr.getAssignees().stream().map(User::getLogin).toList() : List.of();
         return new PrData(
             pr.getNumber().intValue(),
             pr.getTitle() != null ? pr.getTitle() : "",

@@ -6,12 +6,14 @@ import dev.smithyai.orchestrator.service.claude.PromptRenderer;
 import dev.smithyai.orchestrator.service.docker.ContainerService;
 import dev.smithyai.orchestrator.service.docker.dto.ContainerState;
 import dev.smithyai.orchestrator.service.docker.dto.WorkflowType;
-import dev.smithyai.orchestrator.service.forgejo.ForgejoClient;
+import dev.smithyai.orchestrator.service.vcs.IssueTrackerClient;
+import dev.smithyai.orchestrator.service.vcs.VcsClient;
 import dev.smithyai.orchestrator.workflow.EventAction;
 import dev.smithyai.orchestrator.workflow.shared.AbstractWorkflowFactory;
 import dev.smithyai.orchestrator.workflow.shared.utils.Naming;
 import java.util.List;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Component;
 
 @Slf4j
@@ -23,18 +25,21 @@ public class ArchitectLearnFactory extends AbstractWorkflowFactory<ArchitectLear
     private final ContainerService containerService;
     private final OrchestratorConfig config;
     private final PromptRenderer renderer;
-    private final ForgejoClient forgejoClient;
+    private final VcsClient vcsClient;
+    private final IssueTrackerClient issueTracker;
 
     public ArchitectLearnFactory(
         OrchestratorConfig config,
         ContainerService containerService,
-        PromptRenderer renderer
+        PromptRenderer renderer,
+        @Qualifier("architectVcs") VcsClient vcsClient,
+        @Qualifier("architectIssueTracker") IssueTrackerClient issueTracker
     ) {
         this.config = config;
         this.containerService = containerService;
         this.renderer = renderer;
-        String token = config.hasArchitect() ? config.architectForgejoToken() : config.smithyForgejoToken();
-        this.forgejoClient = new ForgejoClient(config.forgejoUrl(), token);
+        this.vcsClient = vcsClient;
+        this.issueTracker = issueTracker;
     }
 
     @Override
@@ -43,7 +48,7 @@ public class ArchitectLearnFactory extends AbstractWorkflowFactory<ArchitectLear
             case WorkflowEvent.PrMerged e -> {
                 var prc = e.prc();
                 String contextRepo = Naming.contextRepoName(prc.info().repo());
-                if (!forgejoClient.repoExists(prc.info().owner(), contextRepo)) {
+                if (!vcsClient.repoExists(prc.info().owner(), contextRepo)) {
                     log.warn("Context repo {}/{} does not exist, skipping learning", prc.info().owner(), contextRepo);
                     yield EventAction.IGNORE;
                 }
@@ -78,7 +83,9 @@ public class ArchitectLearnFactory extends AbstractWorkflowFactory<ArchitectLear
     @Override
     protected ArchitectLearnInstance createInstance(String key, WorkflowEvent event) {
         var session = containerService.createSession(key);
-        return new ArchitectLearnInstance(session, forgejoClient, renderer, config, TOOLS, () -> removeInstance(key));
+        return new ArchitectLearnInstance(session, vcsClient, issueTracker, renderer, config, TOOLS, () ->
+            removeInstance(key)
+        );
     }
 
     @Override
@@ -97,7 +104,8 @@ public class ArchitectLearnFactory extends AbstractWorkflowFactory<ArchitectLear
         var session = containerService.createSession(containerName);
         return new ArchitectLearnInstance(
             session,
-            forgejoClient,
+            vcsClient,
+            issueTracker,
             renderer,
             config,
             TOOLS,

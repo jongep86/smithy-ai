@@ -6,17 +6,29 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 
 @ConfigurationProperties(prefix = "orchestrator")
 public record OrchestratorConfig(
+    // Forgejo settings
     String forgejoUrl,
     String forgejoExternalUrl,
     String smithyForgejoToken,
+    String architectForgejoToken,
+    // GitLab settings
+    String gitlabUrl,
+    String gitlabExternalUrl,
+    String smithyGitlabToken,
+    String architectGitlabToken,
+    String gitlabWebhookSecret,
+    // Provider selection
+    String vcsProvider,
+    String issueProvider,
+    // Common settings
     String claudeCodeOauthToken,
     String dockerNetwork,
     String taskImage,
     String webhookSecret,
     String cacheVolumes,
-    String architectForgejoToken,
     String architectBotUser,
-    String dockerCommand
+    String dockerCommand,
+    String smithyBotUser
 ) {
     private static final Map<String, CacheVolumeEntry> CACHE_VOLUME_MAP = Map.of(
         "pnpm",
@@ -43,7 +55,33 @@ public record OrchestratorConfig(
     }
 
     public boolean hasArchitect() {
-        return (architectForgejoToken != null && !architectForgejoToken.isBlank());
+        return hasArchitectToken();
+    }
+
+    public String resolvedVcsProvider() {
+        return vcsProvider != null && !vcsProvider.isBlank() ? vcsProvider : "forgejo";
+    }
+
+    public String resolvedIssueProvider() {
+        return issueProvider != null && !issueProvider.isBlank() ? issueProvider : resolvedVcsProvider();
+    }
+
+    public String resolvedSmithyBotUser() {
+        return smithyBotUser != null && !smithyBotUser.isBlank() ? smithyBotUser : "smithy";
+    }
+
+    public String resolvedExternalUrl() {
+        return switch (resolvedVcsProvider()) {
+            case "gitlab" -> gitlabExternalUrl != null && !gitlabExternalUrl.isBlank() ? gitlabExternalUrl : gitlabUrl;
+            default -> forgejoExternalUrl;
+        };
+    }
+
+    private boolean hasArchitectToken() {
+        return switch (resolvedVcsProvider()) {
+            case "gitlab" -> architectGitlabToken != null && !architectGitlabToken.isBlank();
+            default -> architectForgejoToken != null && !architectForgejoToken.isBlank();
+        };
     }
 
     private record CacheVolumeEntry(String volumeName, String mountPath) {}

@@ -1,6 +1,5 @@
 package dev.smithyai.orchestrator.workflow.flows.smithy;
 
-import dev.smithyai.forgejoclient.model.PullReviewComment;
 import dev.smithyai.orchestrator.config.OrchestratorConfig;
 import dev.smithyai.orchestrator.model.*;
 import dev.smithyai.orchestrator.model.events.WorkflowEvent;
@@ -10,7 +9,9 @@ import dev.smithyai.orchestrator.service.docker.*;
 import dev.smithyai.orchestrator.service.docker.dto.ContainerConfig;
 import dev.smithyai.orchestrator.service.docker.dto.ContainerState;
 import dev.smithyai.orchestrator.service.docker.dto.WorkflowType;
-import dev.smithyai.orchestrator.service.forgejo.ForgejoClient;
+import dev.smithyai.orchestrator.service.vcs.IssueTrackerClient;
+import dev.smithyai.orchestrator.service.vcs.VcsClient;
+import dev.smithyai.orchestrator.service.vcs.dto.ReviewCommentEntry;
 import dev.smithyai.orchestrator.workflow.shared.AbstractWorkflowInstance;
 import dev.smithyai.orchestrator.workflow.shared.StateMachine;
 import dev.smithyai.orchestrator.workflow.shared.utils.AttachmentHelper;
@@ -29,30 +30,33 @@ public class SmithyWorkflowInstance extends AbstractWorkflowInstance {
 
     public SmithyWorkflowInstance(
         ContainerSession session,
-        ForgejoClient forgejoClient,
+        VcsClient vcsClient,
+        IssueTrackerClient issueTracker,
         PromptRenderer renderer,
         OrchestratorConfig config,
         List<String> tools,
         Runnable destroyCallback
     ) {
-        this(session, forgejoClient, renderer, config, tools, destroyCallback, Stage.NEW);
+        this(session, vcsClient, issueTracker, renderer, config, tools, destroyCallback, Stage.NEW);
     }
 
     public SmithyWorkflowInstance(
         ContainerSession session,
-        ForgejoClient forgejoClient,
+        VcsClient vcsClient,
+        IssueTrackerClient issueTracker,
         PromptRenderer renderer,
         OrchestratorConfig config,
         List<String> tools,
         Runnable destroyCallback,
         Stage initialStage
     ) {
-        this(session, forgejoClient, renderer, config, tools, destroyCallback, initialStage, null);
+        this(session, vcsClient, issueTracker, renderer, config, tools, destroyCallback, initialStage, null);
     }
 
     public SmithyWorkflowInstance(
         ContainerSession session,
-        ForgejoClient forgejoClient,
+        VcsClient vcsClient,
+        IssueTrackerClient issueTracker,
         PromptRenderer renderer,
         OrchestratorConfig config,
         List<String> tools,
@@ -60,7 +64,7 @@ public class SmithyWorkflowInstance extends AbstractWorkflowInstance {
         Stage initialStage,
         String existingSessionId
     ) {
-        super(session, forgejoClient, renderer, config, tools, destroyCallback, existingSessionId);
+        super(session, vcsClient, issueTracker, renderer, config, tools, destroyCallback, existingSessionId);
         // @formatter:off
         this.stateMachine = StateMachine.builder(Stage.class, initialStage)
             .in(Stage.NEW)
@@ -123,7 +127,7 @@ public class SmithyWorkflowInstance extends AbstractWorkflowInstance {
 
             // Fetch and inject attachments
             var attachments = AttachmentHelper.fetchAndInject(
-                forgejoClient,
+                issueTracker,
                 session,
                 info.owner(),
                 info.repo(),
@@ -154,7 +158,7 @@ public class SmithyWorkflowInstance extends AbstractWorkflowInstance {
             var planSrc = claude.latestPlanFile();
             if (planSrc.isEmpty()) {
                 log.warn("Claude returned empty plan for issue #{}", ctx.number());
-                forgejoClient.createIssueComment(
+                issueTracker.createIssueComment(
                     info.owner(),
                     info.repo(),
                     ctx.number(),
@@ -178,8 +182,8 @@ public class SmithyWorkflowInstance extends AbstractWorkflowInstance {
 
             // Post link to plan
             String publicBase = e.repoHtmlUrl();
-            String planUrl = publicBase + "/src/branch/" + branch + "/" + planPath;
-            forgejoClient.createIssueComment(
+            String planUrl = vcsClient.fileBrowseUrl(publicBase, branch, planPath);
+            issueTracker.createIssueComment(
                 info.owner(),
                 info.repo(),
                 ctx.number(),
@@ -212,7 +216,7 @@ public class SmithyWorkflowInstance extends AbstractWorkflowInstance {
             }
 
             var attachments = AttachmentHelper.fetchAndInject(
-                forgejoClient,
+                issueTracker,
                 session,
                 info.owner(),
                 info.repo(),
@@ -262,7 +266,7 @@ public class SmithyWorkflowInstance extends AbstractWorkflowInstance {
             }
 
             // Create draft PR
-            var pr = forgejoClient.createPullRequest(
+            var pr = vcsClient.createPullRequest(
                 info.owner(),
                 info.repo(),
                 ctx.title(),
@@ -271,13 +275,13 @@ public class SmithyWorkflowInstance extends AbstractWorkflowInstance {
                 "fixes #" + ctx.number(),
                 true
             );
-            log.info("Created draft PR #{} for issue #{}", pr.getNumber(), ctx.number());
+            log.info("Created draft PR #{} for issue #{}", pr.number(), ctx.number());
 
-            forgejoClient.setIssueAssignees(info.owner(), info.repo(), pr.getNumber().intValue(), List.of("smithy"));
+            vcsClient.setPrAssignees(info.owner(), info.repo(), pr.number(), List.of("smithy"));
 
             // Fetch attachments
             var attachments = AttachmentHelper.fetchAndInject(
-                forgejoClient,
+                issueTracker,
                 session,
                 info.owner(),
                 info.repo(),
@@ -305,28 +309,16 @@ public class SmithyWorkflowInstance extends AbstractWorkflowInstance {
             syncSessionId();
 
             // Push
-            PushHelper.pushWithRetry(
-                session,
-                claude,
-                forgejoClient,
-                info.owner(),
-                info.repo(),
-                pr.getNumber().intValue()
-            );
+            PushHelper.pushWithRetry(session, claude, vcsClient, info.owner(), info.repo(), pr.number());
 
             // Request review
             String approver = e.approver();
             if (approver != null && !approver.isBlank()) {
                 try {
-                    forgejoClient.requestReview(
-                        info.owner(),
-                        info.repo(),
-                        pr.getNumber().intValue(),
-                        List.of(approver)
-                    );
-                    log.info("Requested review from {} on PR #{}", approver, pr.getNumber());
+                    vcsClient.requestReview(info.owner(), info.repo(), pr.number(), List.of(approver));
+                    log.info("Requested review from {} on PR #{}", approver, pr.number());
                 } catch (Exception ex) {
-                    log.warn("Failed to request review from {} on PR #{}", approver, pr.getNumber(), ex);
+                    log.warn("Failed to request review from {} on PR #{}", approver, pr.number(), ex);
                 }
             }
 
@@ -387,13 +379,13 @@ public class SmithyWorkflowInstance extends AbstractWorkflowInstance {
 
         try {
             var commentDicts = new ArrayList<Map<String, Object>>();
-            List<PullReviewComment> reviewComments;
+            List<ReviewCommentEntry> reviewComments;
             String reviewBody = e.reviewBody();
 
             if (e.reviewId() > 0) {
-                reviewComments = forgejoClient.getReviewComments(info.owner(), info.repo(), prNumber, e.reviewId());
+                reviewComments = vcsClient.getReviewComments(info.owner(), info.repo(), prNumber, e.reviewId());
             } else {
-                var result = forgejoClient.getLatestReviewComments(info.owner(), info.repo(), prNumber, e.reviewer());
+                var result = vcsClient.getLatestReviewComments(info.owner(), info.repo(), prNumber, e.reviewer());
                 reviewComments = result.comments();
                 reviewBody = result.reviewBody();
             }
@@ -401,10 +393,10 @@ public class SmithyWorkflowInstance extends AbstractWorkflowInstance {
             for (var rc : reviewComments) {
                 commentDicts.add(
                     new CommentData(
-                        rc.getUser().getLogin(),
-                        rc.getBody(),
-                        rc.getPath() != null ? rc.getPath() : "",
-                        rc.getPosition() != null ? rc.getPosition() : 0
+                        rc.userLogin(),
+                        rc.body(),
+                        rc.path() != null ? rc.path() : "",
+                        (int) rc.position()
                     ).toMap()
                 );
             }
@@ -431,17 +423,10 @@ public class SmithyWorkflowInstance extends AbstractWorkflowInstance {
     private void handleHumanPush(WorkflowEvent.HumanPush e) {
         session.updateState(ContainerState::touch);
         try {
-            var pr = forgejoClient.findPrByHead(e.info().owner(), e.info().repo(), e.branch());
+            var pr = vcsClient.findPrByHead(e.info().owner(), e.info().repo(), e.branch());
 
-            if (
-                pr != null &&
-                (pr.getAssignees() == null ||
-                    pr
-                        .getAssignees()
-                        .stream()
-                        .noneMatch(a -> BOT_USER.equals(a.getLogin())))
-            ) {
-                log.info("Smithy unassigned from PR #{}, ignoring human push", pr.getNumber());
+            if (pr != null && (pr.assignees() == null || !pr.assignees().contains(BOT_USER))) {
+                log.info("Smithy unassigned from PR #{}, ignoring human push", pr.number());
                 return;
             }
 
@@ -496,7 +481,7 @@ public class SmithyWorkflowInstance extends AbstractWorkflowInstance {
             state = state.withCiPaused(true);
             session.writeState(state);
             if (ciRun.prNumber() != null) {
-                forgejoClient.createIssueComment(
+                vcsClient.createPrComment(
                     info.owner(),
                     info.repo(),
                     ciRun.prNumber(),
@@ -539,7 +524,7 @@ public class SmithyWorkflowInstance extends AbstractWorkflowInstance {
             if (!session.exists()) return;
 
             if (!skipAssignmentCheck && prNumber != null) {
-                if (!forgejoClient.isAssigned(info.owner(), info.repo(), prNumber, BOT_USER)) {
+                if (!vcsClient.isAssigned(info.owner(), info.repo(), prNumber, BOT_USER)) {
                     log.info("Smithy unassigned from PR #{}, skipping resume build", prNumber);
                     return;
                 }
@@ -556,7 +541,7 @@ public class SmithyWorkflowInstance extends AbstractWorkflowInstance {
             claude.ensureCommitted();
             syncSessionId();
 
-            PushHelper.pushWithRetry(session, claude, forgejoClient, info.owner(), info.repo(), prNumber);
+            PushHelper.pushWithRetry(session, claude, vcsClient, info.owner(), info.repo(), prNumber);
         } catch (Exception ex) {
             log.error("Resume build failed for issue #{}", issueId, ex);
         }

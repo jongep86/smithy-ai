@@ -14,6 +14,7 @@ import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.ResponseEntity;
+import org.springframework.lang.Nullable;
 import org.springframework.web.bind.annotation.*;
 
 @Slf4j
@@ -24,17 +25,20 @@ public class WebhookController {
     private final WorkflowService workflowService;
     private final ObjectMapper mapper;
     private final EventMapper eventMapper;
+    private final GitLabEventMapper gitLabEventMapper;
 
     public WebhookController(
         OrchestratorConfig config,
         WorkflowService workflowService,
         ObjectMapper mapper,
-        EventMapper eventMapper
+        EventMapper eventMapper,
+        @Nullable GitLabEventMapper gitLabEventMapper
     ) {
         this.config = config;
         this.workflowService = workflowService;
         this.mapper = mapper;
         this.eventMapper = eventMapper;
+        this.gitLabEventMapper = gitLabEventMapper;
     }
 
     @PostMapping("/webhooks/forgejo")
@@ -74,6 +78,49 @@ public class WebhookController {
         }
     }
 
+    @PostMapping("/webhooks/gitlab")
+    public ResponseEntity<String> handleGitLabWebhook(
+        @RequestBody byte[] body,
+        @RequestHeader(value = "X-Gitlab-Token", defaultValue = "") String token,
+        @RequestHeader(value = "X-Gitlab-Event", required = false) String eventType
+    ) {
+        if (gitLabEventMapper == null) {
+            return ResponseEntity.status(404).body("GitLab integration not enabled");
+        }
+
+        String secret = config.gitlabWebhookSecret();
+        if (
+            secret == null ||
+            secret.isBlank() ||
+            !MessageDigest.isEqual(secret.getBytes(StandardCharsets.UTF_8), token.getBytes(StandardCharsets.UTF_8))
+        ) {
+            log.warn("GitLab webhook rejected: invalid token");
+            return ResponseEntity.status(403).body("Invalid token");
+        }
+
+        if (eventType == null || eventType.isBlank()) {
+            log.warn("Missing GitLab event type header");
+            return ResponseEntity.badRequest().body("Missing event type");
+        }
+
+        try {
+            JsonNode payload = mapper.readTree(body);
+            log.info("GitLab webhook received: {}", eventType);
+
+            WorkflowEvent event = gitLabEventMapper.map(eventType, payload);
+            if (event != null) {
+                log.debug("Parsed GitLab event: {}", event.getClass().getSimpleName());
+                workflowService.onEvent(event);
+            } else {
+                log.debug("No event produced for GitLab {}", eventType);
+            }
+            return ResponseEntity.ok("");
+        } catch (Exception e) {
+            log.error("Failed to process GitLab webhook", e);
+            return ResponseEntity.internalServerError().body("Error");
+        }
+    }
+
     @GetMapping("/api/health")
     public ResponseEntity<String> health() {
         return ResponseEntity.ok("ok");
@@ -88,8 +135,8 @@ public class WebhookController {
             case "push" -> eventMapper.mapPush(payload);
             case "pull_request" -> eventMapper.mapPullRequest(action, payload);
             case "pull_request_comment" -> "reviewed".equals(action)
-                    ? eventMapper.mapReviewSubmitted(payload)
-                    : eventMapper.mapPrComment(payload);
+                ? eventMapper.mapReviewSubmitted(payload)
+                : eventMapper.mapPrComment(payload);
             case "pull_request_rejected" -> eventMapper.mapReviewSubmitted(payload);
             case "action_run_failure", "action_run_recover" -> eventMapper.mapCiEvent(eventType, payload);
             default -> {

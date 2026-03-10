@@ -4,25 +4,28 @@ import com.fasterxml.jackson.databind.JsonNode;
 import dev.smithyai.orchestrator.config.OrchestratorConfig;
 import dev.smithyai.orchestrator.model.*;
 import dev.smithyai.orchestrator.model.events.WorkflowEvent;
-import dev.smithyai.orchestrator.service.forgejo.ForgejoClient;
+import dev.smithyai.orchestrator.service.vcs.VcsClient;
+import dev.smithyai.orchestrator.service.vcs.dto.PrData;
 import dev.smithyai.orchestrator.workflow.shared.utils.Naming;
 import java.util.List;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Component;
 
 @Slf4j
 @Component
 public class EventMapper {
 
-    private static final String BOT_USER = "smithy";
     private static final String SMITHY_EMAIL = "smithy@localhost";
 
     private final OrchestratorConfig config;
-    private final ForgejoClient smithyClient;
+    private final VcsClient smithyClient;
+    private final String botUser;
 
-    public EventMapper(OrchestratorConfig config) {
+    public EventMapper(OrchestratorConfig config, @Qualifier("smithyVcs") VcsClient smithyClient) {
         this.config = config;
-        this.smithyClient = new ForgejoClient(config.forgejoUrl(), config.smithyForgejoToken());
+        this.smithyClient = smithyClient;
+        this.botUser = config.resolvedSmithyBotUser();
     }
 
     // ── Issue events ─────────────────────────────
@@ -37,7 +40,7 @@ public class EventMapper {
     }
 
     private WorkflowEvent mapIssueAssigned(JsonNode payload) {
-        if (!isUserAssigned(payload, BOT_USER)) return null;
+        if (!isUserAssigned(payload, botUser)) return null;
         if (!"open".equals(payload.path("issue").path("state").asText(""))) return null;
 
         var ctx = extractIssue(payload);
@@ -46,7 +49,7 @@ public class EventMapper {
     }
 
     private WorkflowEvent mapIssueUnassigned(JsonNode payload) {
-        if (isUserAssigned(payload, BOT_USER)) return null;
+        if (isUserAssigned(payload, botUser)) return null;
 
         var ctx = extractIssue(payload);
         return new WorkflowEvent.IssueUnassigned(ctx);
@@ -77,7 +80,7 @@ public class EventMapper {
     public WorkflowEvent mapIssueComment(JsonNode payload) {
         if (!"created".equals(payload.path("action").asText(""))) return null;
         String commentUser = payload.path("comment").path("user").path("login").asText("");
-        if (BOT_USER.equals(commentUser)) return null;
+        if (botUser.equals(commentUser)) return null;
 
         var issue = payload.get("issue");
 
@@ -107,8 +110,8 @@ public class EventMapper {
         // Smithy: needs head branch from API to determine if smithy branch
         try {
             log.debug("Fetching PR #{} from {}/{}", prNumber, info.owner(), info.repo());
-            var pr = smithyClient.getPullRequest(info.owner(), info.repo(), prNumber);
-            String headBranch = pr.getHead().getRef();
+            PrData pr = smithyClient.getPullRequest(info.owner(), info.repo(), prNumber);
+            String headBranch = pr.headRef();
 
             if (Naming.isSmithyBranch(headBranch)) {
                 Integer issueId = Naming.parseIssueIdFromBranch(headBranch);
@@ -116,11 +119,11 @@ public class EventMapper {
                     var prc = new PrContext(
                         info,
                         prNumber,
-                        pr.getTitle() != null ? pr.getTitle() : "",
-                        pr.getBody() != null ? pr.getBody() : "",
-                        Boolean.TRUE.equals(pr.getMerged()),
+                        pr.title(),
+                        pr.body(),
+                        pr.merged(),
                         headBranch,
-                        pr.getBase().getRef()
+                        pr.baseRef()
                     );
                     return new WorkflowEvent.PrConversationComment(prc, commentUser, commentBody);
                 }
@@ -220,7 +223,7 @@ public class EventMapper {
         boolean smithyAssigned = false;
         if (assignees.isArray()) {
             for (var a : assignees) {
-                if (BOT_USER.equals(a.path("login").asText(""))) {
+                if (botUser.equals(a.path("login").asText(""))) {
                     smithyAssigned = true;
                     break;
                 }
@@ -240,7 +243,7 @@ public class EventMapper {
 
         var comment = payload.path("comment");
         String commentUser = comment.path("user").path("login").asText("");
-        if (BOT_USER.equals(commentUser)) return null;
+        if (botUser.equals(commentUser)) return null;
 
         var pr = payload.path("pull_request");
         String headBranch = pr.path("head").path("ref").asText("");
@@ -274,7 +277,7 @@ public class EventMapper {
 
         var review = payload.path("review");
         String reviewUser = review.path("user").path("login").asText(payload.path("sender").path("login").asText(""));
-        if (BOT_USER.equals(reviewUser)) return null;
+        if (botUser.equals(reviewUser)) return null;
 
         var pr = payload.path("pull_request");
         String headBranch = pr.path("head").path("ref").asText("");
@@ -361,12 +364,12 @@ public class EventMapper {
 
         if (prettyref.startsWith("#")) {
             prNumber = Integer.parseInt(prettyref.substring(1));
-            var pr = smithyClient.getPullRequest(owner, repoName, prNumber);
-            headBranch = pr.getHead().getRef();
+            PrData pr = smithyClient.getPullRequest(owner, repoName, prNumber);
+            headBranch = pr.headRef();
         } else {
             headBranch = prettyref;
-            var pr = smithyClient.findPrByHead(owner, repoName, headBranch);
-            prNumber = pr != null ? pr.getNumber().intValue() : null;
+            PrData pr = smithyClient.findPrByHead(owner, repoName, headBranch);
+            prNumber = pr != null ? pr.number() : null;
         }
 
         var info = new RepoInfo(owner, repoName, "");
