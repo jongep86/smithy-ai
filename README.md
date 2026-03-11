@@ -11,6 +11,8 @@ Smithy-AI coordinates multiple AI agents working alongside human developers thro
 - **Agent Smithy**: plans and implements features based on issues, creates pull requests, and responds to review feedback.
 - **The Architect**: reviews pull requests against established best practices and maintains the project's knowledge base in a separate context repository.
 
+![Diagram of Smithy workflow](/docs/Smithy-diagram.png)
+
 ### Smithy development workflow
 
 1. Create an issue and assign to Agent Smithy
