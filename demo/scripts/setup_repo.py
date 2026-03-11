@@ -105,14 +105,18 @@ def ensure_context_repo(api: ForgejoAPI, owner: str, repo_name: str):
     except APIError as e:
         if e.status != 404:
             raise
-        api.post(
-            f"/orgs/{owner}/repos",
-            {
-                "name": context_repo,
-                "description": f"Architectural context for {repo_name}, maintained by The Architect",
-                "auto_init": True,
-            },
-        )
+        body = {
+            "name": context_repo,
+            "description": f"Architectural context for {repo_name}, maintained by The Architect",
+            "auto_init": True,
+        }
+        # Try creating under org first; fall back to user repo
+        try:
+            api.post(f"/orgs/{owner}/repos", body)
+        except APIError as org_err:
+            if org_err.status != 404:
+                raise
+            api.post(f"/admin/users/{owner}/repos", body)
         print(f"    Created context repo: {repo_path}")
 
     return repo_path
