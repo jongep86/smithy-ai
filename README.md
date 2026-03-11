@@ -37,25 +37,32 @@ Human actions are in yellow. The project knowledge base is an optional separate 
 
 ## Demo setup
 
-The `demo/` directory contains a Docker Compose stack that runs a local Forgejo instance with the orchestrator. Install https://github.com/smithy-ai/forgejo-client first, it's a required dependency.
+The `demo/` directory contains a Docker Compose stack that runs a local Forgejo instance with the orchestrator.
 
 ```bash
+# Build the images
+scripts/build-images.sh
+
 cd demo
 cp .env.example .env
-# Edit .env with your CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`), other fields can be left empty
+```
 
-# Build the images
-../scripts/build-images.sh
+Edit .env with your CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`)
+Other fields are set automatically by the setup scripts below.
 
-# Start the docker compose stack
+```bash
+# Start the docker compose demo stack
 docker compose up -d
+```
 
-# Once Forgejo is running, configure it on http://localhost:3000 and then set up users and tokens:
+Once Forgejo is running, configure it on [http://localhost:3000](http://localhost:3000) and create a repository.
+Then run the scripts to configure Forgejo and the repository:
+
+```bash
+# Only the first time:
 python3 scripts/setup_instance.py
 
-# Create a repository on http://localhost:3000
-
-# Configure a repository for use with the orchestrator:
+# For every repository:
 python3 scripts/setup_repo.py owner/repo
 ```
 
