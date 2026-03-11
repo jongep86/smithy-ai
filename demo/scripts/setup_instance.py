@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """One-time Forgejo instance setup.
 
-Creates bot users, API tokens, secrets, and OAuth2 app.
+Creates bot users, API tokens, and secrets.
 Fully idempotent — safe to re-run. Auto-writes values to .env.
 
 Usage:
@@ -107,48 +107,6 @@ def get_or_create_token(
         print(f"    Failed to create token for {username}")
 
 
-def get_or_create_oauth2_app(api: ForgejoAPI, env: EnvFile, orchestrator_url: str):
-    """Register OAuth2 application if it doesn't exist."""
-    app_name = "smithy-dashboard"
-
-    existing_id = env.get("OAUTH2_CLIENT_ID")
-    existing_secret = env.get("OAUTH2_CLIENT_SECRET")
-    if existing_id and existing_secret:
-        print(f"    Using existing OAuth2 credentials from .env")
-        return
-
-    # Check if app already exists
-    try:
-        apps = api.get("/user/applications/oauth2")
-        if apps:
-            for app in apps:
-                if app.get("name") == app_name:
-                    client_id = app.get("client_id", "")
-                    print(f"    OAuth2 app already exists (client_id: {client_id[:8]}...)")
-                    env.set("OAUTH2_CLIENT_ID", client_id)
-                    if not existing_secret:
-                        print(f"    Warning: OAUTH2_CLIENT_SECRET not in .env and cannot be retrieved")
-                        print(f"    Delete the OAuth2 app in Forgejo and re-run to regenerate")
-                    return
-    except APIError:
-        pass
-
-    # Create new app
-    result = api.post(
-        "/user/applications/oauth2",
-        {
-            "name": app_name,
-            "redirect_uris": [f"{orchestrator_url}/api/auth/callback"],
-            "confidential_client": True,
-        },
-    )
-    client_id = result.get("client_id", "")
-    client_secret = result.get("client_secret", "")
-    env.set("OAUTH2_CLIENT_ID", client_id)
-    env.set("OAUTH2_CLIENT_SECRET", client_secret)
-    print(f"    OAuth2 app created (client_id: {client_id[:8]}...)")
-
-
 def get_runner_token(env: EnvFile):
     """Generate a runner registration token if not already in .env."""
     if env.get("RUNNER_TOKEN"):
@@ -226,13 +184,6 @@ def main():
     # Step 4: Runner token
     print("==> Getting runner registration token...")
     get_runner_token(env)
-
-    # Step 5: OAuth2 application
-    orchestrator_url = env.get("ORCHESTRATOR_URL") or "http://localhost:8000"
-    env.set("ORCHESTRATOR_URL", orchestrator_url)
-
-    print("==> Registering OAuth2 application...")
-    get_or_create_oauth2_app(api, env, orchestrator_url)
 
     # Save .env
     env.save()

@@ -42,12 +42,18 @@ The `demo/` directory contains a Docker Compose stack that runs a local Forgejo 
 ```bash
 cd demo
 cp .env.example .env
-# Edit .env with your CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`)
+# Edit .env with your CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`), other fields can be left empty
 
+# Build the images
+../scripts/build-images.sh
+
+# Start the docker compose stack
 docker compose up -d
 
-# Once Forgejo is running, set up bot users and tokens:
+# Once Forgejo is running, configure it on http://localhost:3000 and then set up users and tokens:
 python3 scripts/setup_instance.py
+
+# Create a repository on http://localhost:3000
 
 # Configure a repository for use with the orchestrator:
 python3 scripts/setup_repo.py owner/repo
