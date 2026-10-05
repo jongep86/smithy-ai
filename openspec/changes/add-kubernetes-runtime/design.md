@@ -77,8 +77,14 @@ Kubernetes exec has no `-w` or `-e`. Commands run as
 and environment as positional arguments, so nothing is interpolated into a shell string. This works
 with busybox images as well as GNU coreutils.
 
-Stdin is written and then closed, as with `docker exec -i`. Exit code comes from the exec status
-channel. On timeout the stream is closed and the result is exit code 124, matching `DockerCli`.
+Stdin does not use the exec stdin channel. Measured against a 1.36 cluster with fabric8 7.9.0
+(JDK and OkHttp clients alike), a command that writes to stdout after reading stdin hung until its
+timeout, and payloads from 32 KiB up were sometimes lost entirely while the exec still exited 0.
+`kubectl exec -i` handled the same cases, so the cause is client-side. Stdin is therefore written to
+`/tmp/.smithy-stdin-<uuid>` as base64 arguments in 48 KiB chunks (well under Linux's 128 KiB
+per-argument limit), its size is checked, and the command runs with `< file`, which is then removed.
+A 512 KiB payload takes 3 to 5 seconds this way. Exit code comes from the exec status channel. On
+timeout the stream is closed and the result is exit code 124, matching `DockerCli`.
 
 ### 5. Caches as namespace-wide PVCs
 

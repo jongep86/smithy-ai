@@ -20,16 +20,16 @@ import io.fabric8.kubernetes.client.KubernetesClient;
 import io.fabric8.kubernetes.client.KubernetesClientException;
 import io.fabric8.kubernetes.client.dsl.ExecListener;
 import io.fabric8.kubernetes.client.dsl.ExecWatch;
-import io.fabric8.kubernetes.client.dsl.TtyExecOutputErrorable;
 import java.io.ByteArrayOutputStream;
-import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
@@ -58,6 +58,11 @@ public class KubernetesRuntime implements ContainerRuntime {
     private static final Duration DEFAULT_TIMEOUT = Duration.ofSeconds(30);
     private static final Duration REMOVE_TIMEOUT = Duration.ofSeconds(120);
     private static final Duration STREAM_DRAIN = Duration.ofSeconds(5);
+    private static final Duration STDIN_UPLOAD_TIMEOUT = Duration.ofSeconds(60);
+    private static final int UPLOAD_CHUNK = 48 * 1024;
+
+    /** Runs "$@" with stdin from the file in $0, removes the file, keeps the exit code. */
+    private static final String STDIN_FROM_FILE = "f=\"$0\"; \"$@\" < \"$f\"; rc=$?; rm -f \"$f\"; exit $rc";
 
     /** Seeds /root from the image once, so images that install tools there keep them. */
     private static final String SEED_ROOT_SCRIPT = """
@@ -260,7 +265,24 @@ public class KubernetesRuntime implements ContainerRuntime {
         byte[] stdin,
         Duration timeout
     ) {
-        var raw = run(name, wrap(command, environment, workdir), stdin, timeout);
+        var wrapped = wrap(command, environment, workdir);
+        RawResult raw;
+        if (stdin == null) {
+            raw = run(name, wrapped, timeout);
+        } else {
+            // The exec stdin channel is not usable here: with this client a
+            // command that writes to stdout after reading stdin hangs, and
+            // payloads above ~16 KiB are sometimes lost whole (kubectl handles
+            // both). So stdin is shipped to a file as arguments, and the
+            // command reads that file.
+            String file = "/tmp/.smithy-stdin-" + UUID.randomUUID();
+            raw = upload(name, file, stdin);
+            if (raw.exitCode == 0) {
+                var fromFile = new ArrayList<String>(List.of("sh", "-c", STDIN_FROM_FILE, file));
+                fromFile.addAll(wrapped);
+                raw = run(name, fromFile, timeout);
+            }
+        }
         return new ExecResult(
             raw.exitCode,
             new String(raw.stdout, StandardCharsets.UTF_8),
@@ -270,7 +292,7 @@ public class KubernetesRuntime implements ContainerRuntime {
 
     @Override
     public byte[] execForBytes(String name, List<String> command, Duration timeout) {
-        var raw = run(name, command, null, timeout);
+        var raw = run(name, command, timeout);
         if (raw.exitCode != 0) {
             throw new RuntimeException(
                 "exec failed (exit " +
@@ -310,16 +332,55 @@ public class KubernetesRuntime implements ContainerRuntime {
 
     private record RawResult(int exitCode, byte[] stdout, byte[] stderr) {}
 
-    private RawResult run(String name, List<String> command, byte[] stdin, Duration timeout) {
+    /**
+     * Write {@code data} to {@code file} in base64 chunks passed as arguments,
+     * then check the size. A chunk stays well under Linux's 128 KiB limit on a
+     * single argument.
+     */
+    private RawResult upload(String name, String file, byte[] data) {
+        var encoder = Base64.getEncoder();
+        int offset = 0;
+        boolean first = true;
+        do {
+            int length = Math.min(UPLOAD_CHUNK, data.length - offset);
+            String chunk = encoder.encodeToString(java.util.Arrays.copyOfRange(data, offset, offset + length));
+            String redirect = first ? ">" : ">>";
+            var result = run(
+                name,
+                List.of("sh", "-c", "printf %s \"$1\" | base64 -d " + redirect + " \"$0\"", file, chunk),
+                STDIN_UPLOAD_TIMEOUT
+            );
+            if (result.exitCode != 0) return result;
+            offset += length;
+            first = false;
+        } while (offset < data.length);
+
+        var size = run(name, List.of("sh", "-c", "wc -c < \"$0\"", file), STDIN_UPLOAD_TIMEOUT);
+        String written = new String(size.stdout, StandardCharsets.UTF_8).strip();
+        if (size.exitCode != 0 || !written.equals(String.valueOf(data.length))) {
+            return new RawResult(
+                1,
+                new byte[0],
+                ("stdin upload to " + file + " wrote " + written + " of " + data.length + " bytes").getBytes(
+                    StandardCharsets.UTF_8
+                )
+            );
+        }
+        return size;
+    }
+
+    private RawResult run(String name, List<String> command, Duration timeout) {
         String id = KubernetesNames.objectName(name);
         Duration effective = timeout != null ? timeout : DEFAULT_TIMEOUT;
         var out = new ByteArrayOutputStream();
         var err = new ByteArrayOutputStream();
         var closed = new CountDownLatch(1);
 
-        var target = client.pods().inNamespace(namespace).withName(podName(id)).inContainer(CONTAINER);
-        TtyExecOutputErrorable io = stdin != null ? target.redirectingInput() : target;
-        var container = io
+        var container = client
+            .pods()
+            .inNamespace(namespace)
+            .withName(podName(id))
+            .inContainer(CONTAINER)
             .writingOutput(out)
             .writingError(err)
             .usingListener(
@@ -339,12 +400,6 @@ public class KubernetesRuntime implements ContainerRuntime {
         ExecWatch watch = null;
         try {
             watch = container.exec(command.toArray(String[]::new));
-            if (stdin != null) {
-                try (var input = watch.getInput()) {
-                    input.write(stdin);
-                    input.flush();
-                }
-            }
             Integer code = watch.exitCode().get(effective.toMillis(), TimeUnit.MILLISECONDS);
             // The status frame can arrive before the last output frames.
             closed.await(STREAM_DRAIN.toMillis(), TimeUnit.MILLISECONDS);
@@ -358,7 +413,7 @@ public class KubernetesRuntime implements ContainerRuntime {
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             return new RawResult(130, out.toByteArray(), "Interrupted".getBytes(StandardCharsets.UTF_8));
-        } catch (ExecutionException | IOException | KubernetesClientException e) {
+        } catch (ExecutionException | KubernetesClientException e) {
             Throwable cause = e instanceof ExecutionException && e.getCause() != null ? e.getCause() : e;
             return new RawResult(1, out.toByteArray(), describe(cause).getBytes(StandardCharsets.UTF_8));
         } finally {
