@@ -5,15 +5,15 @@
 
 ## 2. Configuration
 
-- [ ] 2.1 Add `RuntimeConfig.KubernetesRuntimeConfig` and reject configs with both `docker` and `kubernetes` in `OrchestratorConfigValidator`. Verify: config tests for no block, kubernetes block, and both blocks (startup error names both).
-- [ ] 2.2 Select the `ContainerRuntime` bean from the config. Verify: Spring context test that gets `DockerRuntime` without the block and `KubernetesRuntime` with it.
+- [x] 2.1 Add `RuntimeConfig.KubernetesRuntimeConfig` and reject configs with both `docker` and `kubernetes` in `OrchestratorConfigValidator`. Verify: config tests for no block, kubernetes block, and both blocks (startup error names both).
+- [x] 2.2 Select the `ContainerRuntime` bean from the config. Verify: Spring context test that gets `DockerRuntime` without the block and `KubernetesRuntime` with it.
 
 ## 3. Kubernetes runtime
 
-- [ ] 3.1 Add `io.fabric8:kubernetes-client` and the mock-server test dependency. Verify: `./gradlew :backend:dependencies` resolves and the build passes.
-- [ ] 3.2 Implement name mapping (sanitize, cut, hash, annotation). Verify: unit tests for a short valid name, nested-path names, over-long names, and stability of the mapping.
-- [ ] 3.3 Build the StatefulSet manifest (labels, annotation, env, `smithy-init`, subPath mounts, `/root` seeding init container, cache claims, no SA token, retention policy, pull secrets, resources). Verify: unit test asserting the manifest fields.
-- [ ] 3.4 Implement `create`, `exists`, `isRunning`, `start`, `listManaged`, `remove` (including cache claim creation and per-task claim deletion). Verify: tests against the fabric8 mock server in CRUD mode, including "unrelated pod is not listed" and "remove keeps cache claims".
+- [x] 3.1 Add `io.fabric8:kubernetes-client` and the mock-server test dependency. Verify: `./gradlew :backend:dependencies` resolves and the build passes.
+- [x] 3.2 Implement name mapping (sanitize, cut, hash, annotation). Verify: unit tests for a short valid name, nested-path names, over-long names, and stability of the mapping.
+- [x] 3.3 Build the StatefulSet manifest (labels, annotation, env, `smithy-init`, subPath mounts, `/root` seeding init container, cache claims, no SA token, retention policy, pull secrets, resources). Verify: unit test asserting the manifest fields.
+- [x] 3.4 Implement `create`, `exists`, `isRunning`, `start`, `listManaged`, `remove` (including cache claim creation and per-task claim deletion). Verify: tests against the fabric8 mock server in CRUD mode, including "unrelated pod is not listed" and "remove keeps cache claims".
 - [ ] 3.5 Implement `exec`, `execForBytes` and `logs` with the positional-argument wrapper, stdin, exit status, and timeout as exit code 124. Verify: unit test of the built command line; behaviour checked in 5.2.
 - [ ] 3.6 Make `fetchOwnLogs` use `POD_NAMESPACE`. Verify: unit test with the env set and unset.
 
