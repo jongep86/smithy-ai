@@ -27,4 +27,4 @@
 
 - [x] 5.1 Add `KubernetesLifecycleIT`, run only when `SMITHY_K8S_IT_NAMESPACE` is set: create, init, exec with env and stdin, timeout, file round-trip, pod deletion with state surviving, remove. Verify: passes against the test cluster.
 - [ ] 5.2 Deploy the fork to the test cluster and run one issue end to end (plan, approve, build, PR). Verify: PR created by the bot, task pod and per-task claim removed after the run, cache claim still present.
-- [ ] 5.3 Check least privilege: no service-account token in a task pod, and `kubectl auth can-i` for the orchestrator account is denied outside the task namespace. Verify: command output recorded in the PR description.
+- [x] 5.3 Check least privilege: no service-account token in a task pod, and `kubectl auth can-i` for the orchestrator account is denied outside the task namespace. Verify: command output recorded in the PR description.
