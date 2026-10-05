@@ -33,8 +33,15 @@ dependencies {
     implementation("dev.smithy-ai:forgejo-client:14.0.3")
     implementation("com.github.victools:jsonschema-generator:4.38.0")
     implementation("com.github.victools:jsonschema-module-jackson:4.38.0")
+    // Kubernetes runtime. The JDK HTTP client avoids Vert.x, whose Netty 4.1
+    // clashes with the Netty 4.2 that Spring Boot manages.
+    implementation("io.fabric8:kubernetes-client:7.9.0") {
+        exclude(group = "io.fabric8", module = "kubernetes-httpclient-vertx")
+    }
+    implementation("io.fabric8:kubernetes-httpclient-jdk:7.9.0")
 
     testImplementation("org.springframework.boot:spring-boot-starter-test")
+    testImplementation("io.fabric8:kubernetes-server-mock:7.9.0")
 }
 
 spotless {

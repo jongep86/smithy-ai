@@ -60,6 +60,17 @@ public class ConfigLoader {
 
     @Bean
     public DockerConfig dockerConfig() {
+        var kubernetes = config.runtime() == null ? null : config.runtime().kubernetes();
+        if (kubernetes != null) {
+            // Image and caches are what ContainerInitAction reads; command and
+            // network mean nothing outside Docker but keep their defaults.
+            return new DockerConfig(
+                "docker",
+                "smithy-net",
+                value(kubernetes.taskImage(), "claude-task-default:latest"),
+                String.join(",", kubernetes.caches())
+            );
+        }
         var docker = config.runtime() == null ? null : config.runtime().docker();
         return new DockerConfig(
             value(docker == null ? null : docker.command(), "docker"),

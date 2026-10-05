@@ -16,6 +16,11 @@ final class OrchestratorConfigValidator {
         );
         require(OrchestratorConfig.KIND.equals(config.kind()), "kind must be " + OrchestratorConfig.KIND);
         require(!config.connectors().isEmpty(), "connectors must contain at least one connector");
+        var runtime = config.runtime();
+        require(
+            runtime == null || runtime.docker() == null || runtime.kubernetes() == null,
+            "runtime.docker and runtime.kubernetes cannot both be set"
+        );
         var defaults = config.defaults();
         require(defaults != null, "defaults is required");
         require(defaults.vcs() != null && !defaults.vcs().isBlank(), "defaults.vcs is required");

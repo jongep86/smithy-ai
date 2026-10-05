@@ -78,6 +78,94 @@ class OrchestratorConfigTest {
         assertEquals("defaults.vcs is required in orchestrator.yml", error.getMessage());
     }
 
+    @Test
+    void kubernetesRuntimeSuppliesTaskImageAndCaches() throws Exception {
+        var loader = new ConfigLoader(environmentFor(config(secret()).replace(DOCKER_BLOCK, KUBERNETES_BLOCK)));
+
+        var kubernetes = loader.orchestratorConfig().runtime().kubernetes();
+        assertNull(loader.orchestratorConfig().runtime().docker());
+        assertEquals("smithy-tasks", kubernetes.namespace());
+        assertEquals("10Gi", kubernetes.volumeSize());
+        assertEquals("ReadWriteOnce", kubernetes.cacheAccessMode());
+        assertEquals(300, kubernetes.startTimeout());
+        assertEquals(java.util.List.of("ghcr-creds"), kubernetes.imagePullSecrets());
+        assertEquals("1Gi", kubernetes.resources().get("requests").get("memory"));
+        assertEquals("task:k8s", loader.dockerConfig().taskImage());
+        assertEquals(java.util.Map.of("cache-go", "/root/go/pkg/mod"), loader.dockerConfig().getCacheVolumeMap());
+    }
+
+    @Test
+    void dockerAndKubernetesRuntimesCannotBothBeSet() throws Exception {
+        String both = config(secret()).replace(DOCKER_BLOCK, DOCKER_BLOCK + KUBERNETES_BLOCK.replace("runtime:\n", ""));
+
+        var error = assertThrows(IllegalStateException.class, () -> new ConfigLoader(environmentFor(both)));
+
+        assertEquals(
+            "runtime.docker and runtime.kubernetes cannot both be set in orchestrator.yml",
+            error.getMessage()
+        );
+    }
+
+    @Test
+    void dockerRemainsTheRuntimeWithoutAKubernetesBlock() throws Exception {
+        var loader = new ConfigLoader(environmentFor(config(secret())));
+
+        assertNull(loader.orchestratorConfig().runtime().kubernetes());
+        assertEquals("task:test", loader.dockerConfig().taskImage());
+    }
+
+    @Test
+    void runtimeBeanFollowsTheConfiguredBlock() throws Exception {
+        var beans = new dev.smithyai.orchestrator.service.docker.ContainerRuntimeConfiguration();
+        var docker = new ConfigLoader(environmentFor(config(secret())));
+        var kubernetes = new ConfigLoader(environmentFor(config(secret()).replace(DOCKER_BLOCK, KUBERNETES_BLOCK)));
+        var cli = new dev.smithyai.orchestrator.testing.FakeDockerCli();
+
+        assertInstanceOf(
+            dev.smithyai.orchestrator.service.docker.DockerRuntime.class,
+            beans.containerRuntime(docker.orchestratorConfig(), cli, docker.dockerConfig())
+        );
+        assertInstanceOf(
+            dev.smithyai.orchestrator.service.docker.KubernetesRuntime.class,
+            beans.containerRuntime(kubernetes.orchestratorConfig(), cli, kubernetes.dockerConfig())
+        );
+    }
+
+    private static final String DOCKER_BLOCK = """
+        runtime:
+          docker:
+            command: docker
+            network: test
+            taskImage: task:test
+            caches: [gradle]
+        """;
+
+    private static final String KUBERNETES_BLOCK = """
+        runtime:
+          kubernetes:
+            namespace: smithy-tasks
+            taskImage: task:k8s
+            caches: [go]
+            imagePullSecrets: [ghcr-creds]
+            resources:
+              requests: {memory: 1Gi}
+        """;
+
+    private Path secret() throws Exception {
+        Path webhookSecret = tempDir.resolve("webhook-secret");
+        Files.writeString(webhookSecret, "hook");
+        return webhookSecret;
+    }
+
+    private MockEnvironment environmentFor(String yaml) throws Exception {
+        Path configFile = tempDir.resolve("orchestrator.yml");
+        Files.writeString(configFile, yaml);
+        return new MockEnvironment()
+            .withProperty("ORCHESTRATOR_CONFIG", configFile.toString())
+            .withProperty("CLAUDE_TOKEN", "claude")
+            .withProperty("FORGEJO_SMITHY_TOKEN", "forgejo");
+    }
+
     private static String config(Path webhookSecret) {
         return """
         apiVersion: smithy.ai/v1alpha1
