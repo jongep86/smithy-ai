@@ -137,6 +137,13 @@ remove run against fabric8's mock server in CRUD mode. Exec is checked by a
 - [Seeding `/root` from the image hides later image updates to `/root`] → Seeding happens once per
   task, and tasks are short-lived compared to image releases.
 
+- [An orchestrator restart during a turn kills that turn on Kubernetes] → Observed on the test
+  cluster on 2026-10-06: the Claude process died with its exec stream at the moment the old pod
+  stopped, the plan file was already written, and the run waited in `refine` for an event that
+  never came; a comment on the issue resumes it. On Docker the process survives as an orphan
+  instead. Until turns run detached (follow-up change), do not roll the orchestrator while a turn
+  is running.
+
 ## Migration Plan
 
 Nothing changes for Docker deployments. To move a deployment to Kubernetes, finish or cancel the
