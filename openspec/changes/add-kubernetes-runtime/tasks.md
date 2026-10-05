@@ -1,7 +1,7 @@
 ## 1. Runtime seam (no behaviour change)
 
-- [ ] 1.1 Add `ContainerSpec` and the `ContainerRuntime` interface; move the Docker calls from `ContainerService` into `DockerRuntime`; `ContainerService` builds a `ContainerSpec` instead of Docker args. Verify: `./gradlew :backend:test` passes with `FakeDockerCli` tests unchanged, and the recorded Docker argument lists are identical to before.
-- [ ] 1.2 Add the `go` cache entry (`/root/go/pkg/mod`) to the shared cache table. Verify: unit test resolving `caches: [go]` to that mount.
+- [x] 1.1 Add `ContainerSpec` and the `ContainerRuntime` interface; move the Docker calls from `ContainerService` into `DockerRuntime`; `ContainerService` builds a `ContainerSpec` instead of Docker args. Verify: `./gradlew :backend:test` passes with `FakeDockerCli` tests unchanged, and the recorded Docker argument lists are identical to before.
+- [x] 1.2 Add the `go` cache entry (`/root/go/pkg/mod`) to the shared cache table. Verify: unit test resolving `caches: [go]` to that mount.
 
 ## 2. Configuration
 

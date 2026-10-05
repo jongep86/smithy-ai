@@ -18,7 +18,9 @@ public record DockerConfig(
         "maven",
         new CacheVolumeEntry("cache-maven", "/root/.m2/repository"),
         "gradle",
-        new CacheVolumeEntry("cache-gradle", "/root/.gradle/caches")
+        new CacheVolumeEntry("cache-gradle", "/root/.gradle/caches"),
+        "go",
+        new CacheVolumeEntry("cache-go", "/root/go/pkg/mod")
     );
 
     public Map<String, String> getCacheVolumeMap() {
