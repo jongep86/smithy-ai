@@ -1,6 +1,10 @@
 logging:
   level:
     dev.smithyai.orchestrator: DEBUG
+    # The JDK HTTP client logs a stack trace at WARN on every pod exec whose
+    # websocket the API server already closed. Harmless, and it buries real
+    # errors in the Kubernetes runtime's logs.
+    io.fabric8.kubernetes.client.jdkhttp.JdkWebSocketImpl: ERROR
 
 # Behind Caddy, which terminates TLS: trust its X-Forwarded-* headers so the
 # request counts as HTTPS (secure session cookie, HSTS).
