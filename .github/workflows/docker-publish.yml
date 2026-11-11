@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   build-claude-task-base:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
@@ -48,7 +48,7 @@ jobs:
 
   build-claude-task-default:
     needs: build-claude-task-base
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
@@ -85,7 +85,7 @@ jobs:
           cache-to: type=gha,mode=max
 
   build-orchestrator:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
@@ -120,7 +120,7 @@ jobs:
           cache-to: type=gha,mode=max
 
   build-knowledgebase:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
