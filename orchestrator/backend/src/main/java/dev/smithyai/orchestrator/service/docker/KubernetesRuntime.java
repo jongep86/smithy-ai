@@ -3,37 +3,18 @@ package dev.smithyai.orchestrator.service.docker;
 import dev.smithyai.orchestrator.config.RuntimeConfig.KubernetesRuntimeConfig;
 import dev.smithyai.orchestrator.service.docker.dto.ContainerSpec;
 import dev.smithyai.orchestrator.service.docker.dto.ExecResult;
-import io.fabric8.kubernetes.api.model.EnvVar;
-import io.fabric8.kubernetes.api.model.LocalObjectReference;
 import io.fabric8.kubernetes.api.model.PersistentVolumeClaim;
 import io.fabric8.kubernetes.api.model.PersistentVolumeClaimBuilder;
 import io.fabric8.kubernetes.api.model.Pod;
-import io.fabric8.kubernetes.api.model.Quantity;
-import io.fabric8.kubernetes.api.model.ResourceRequirementsBuilder;
-import io.fabric8.kubernetes.api.model.Volume;
-import io.fabric8.kubernetes.api.model.VolumeBuilder;
-import io.fabric8.kubernetes.api.model.VolumeMount;
-import io.fabric8.kubernetes.api.model.VolumeMountBuilder;
 import io.fabric8.kubernetes.api.model.apps.StatefulSet;
 import io.fabric8.kubernetes.api.model.apps.StatefulSetBuilder;
 import io.fabric8.kubernetes.client.KubernetesClient;
 import io.fabric8.kubernetes.client.KubernetesClientException;
-import io.fabric8.kubernetes.client.dsl.ExecListener;
-import io.fabric8.kubernetes.client.dsl.ExecWatch;
-import java.io.ByteArrayOutputStream;
-import java.nio.charset.StandardCharsets;
 import java.time.Duration;
-import java.util.ArrayList;
-import java.util.Base64;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.UUID;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
 import lombok.extern.slf4j.Slf4j;
 
 /**
@@ -44,46 +25,32 @@ import lombok.extern.slf4j.Slf4j;
  * /root, which is where a task keeps its clone, its state file and its Claude
  * transcripts, so a rescheduled pod picks up where the old one stopped — what a
  * restarted Docker container does with its own filesystem.
+ *
+ * <p>The pod itself and the way it is reached are shared with
+ * {@link SandboxRuntime}: see {@link TaskPods} and {@link PodExec}.
  */
 @Slf4j
 public class KubernetesRuntime implements ContainerRuntime {
 
-    static final String CONTAINER = "task";
-    static final String VOLUME = "task";
-    static final String MANAGED_LABEL = "smithy.managed";
-    static final String ID_LABEL = "smithy.ai/container-id";
-    static final String NAME_ANNOTATION = "smithy.ai/container-name";
-    static final String CACHE_LABEL = "smithy.ai/cache";
+    static final String CONTAINER = TaskPods.CONTAINER;
+    static final String VOLUME = TaskPods.VOLUME;
+    static final String MANAGED_LABEL = TaskPods.MANAGED_LABEL;
+    static final String ID_LABEL = TaskPods.ID_LABEL;
+    static final String NAME_ANNOTATION = TaskPods.NAME_ANNOTATION;
+    static final String CACHE_LABEL = TaskPods.CACHE_LABEL;
 
-    private static final Duration DEFAULT_TIMEOUT = Duration.ofSeconds(30);
     private static final Duration REMOVE_TIMEOUT = Duration.ofSeconds(120);
-    private static final Duration STREAM_DRAIN = Duration.ofSeconds(5);
-    private static final Duration STDIN_UPLOAD_TIMEOUT = Duration.ofSeconds(60);
-    private static final int UPLOAD_CHUNK = 48 * 1024;
-
-    /** Runs "$@" with stdin from the file in $0, removes the file, keeps the exit code. */
-    private static final String STDIN_FROM_FILE = "f=\"$0\"; \"$@\" < \"$f\"; rc=$?; rm -f \"$f\"; exit $rc";
-
-    /** Seeds /root from the image once, so images that install tools there keep them. */
-    private static final String SEED_ROOT_SCRIPT = """
-        mkdir -p /seed/root /seed/workspace /seed/tmp && chmod 1777 /seed/tmp
-        if [ ! -e /seed/root/.smithy-seeded ]; then
-          cp -a /root/. /seed/root/ && touch /seed/root/.smithy-seeded
-        fi
-        """;
 
     private final KubernetesClient client;
     private final KubernetesRuntimeConfig config;
     private final String namespace;
+    private final PodExec pods;
 
     public KubernetesRuntime(KubernetesClient client, KubernetesRuntimeConfig config) {
         this.client = client;
         this.config = config;
-        this.namespace =
-            config.namespace() != null && !config.namespace().isBlank() ? config.namespace() : client.getNamespace();
-        if (this.namespace == null || this.namespace.isBlank()) {
-            throw new IllegalStateException("runtime.kubernetes.namespace is required outside a cluster");
-        }
+        this.namespace = TaskNamespace.resolve(client, config);
+        this.pods = new PodExec(client, namespace);
     }
 
     // ── Lifecycle ────────────────────────────────────────────
@@ -162,22 +129,11 @@ public class KubernetesRuntime implements ContainerRuntime {
             .withLabel(MANAGED_LABEL, "true")
             .list()
             .getItems();
-        var running = includeStopped
-            ? null
-            : client
-                  .pods()
-                  .inNamespace(namespace)
-                  .withLabel(MANAGED_LABEL, "true")
-                  .list()
-                  .getItems()
-                  .stream()
-                  .filter(KubernetesRuntime::isRunning)
-                  .map(p -> p.getMetadata().getLabels().get(ID_LABEL))
-                  .toList();
+        var running = includeStopped ? null : TaskNamespace.runningIds(client, namespace);
         return sets
             .stream()
             .filter(s -> running == null || running.contains(s.getMetadata().getName()))
-            .map(KubernetesRuntime::originalName)
+            .map(s -> TaskNamespace.originalName(s.getMetadata()))
             .toList();
     }
 
@@ -212,49 +168,17 @@ public class KubernetesRuntime implements ContainerRuntime {
         }
     }
 
-    // ── Logs ─────────────────────────────────────────────────
+    // ── Logs and exec ────────────────────────────────────────
 
     @Override
     public String logs(String name, int tailLines) {
-        String id = KubernetesNames.objectName(name);
-        try {
-            return client
-                .pods()
-                .inNamespace(namespace)
-                .withName(podName(id))
-                .inContainer(CONTAINER)
-                .tailingLines(tailLines)
-                .getLog();
-        } catch (KubernetesClientException e) {
-            return "Failed to read logs of " + name + ": " + e.getMessage();
-        }
+        return pods.logs(podName(KubernetesNames.objectName(name)), tailLines);
     }
 
     @Override
     public String ownLogs(int tailLines) {
-        String self = System.getenv("HOSTNAME");
-        if (self == null || self.isBlank()) {
-            return "Unable to determine own pod name (HOSTNAME not set)";
-        }
-        String ownNamespace = System.getenv().getOrDefault("POD_NAMESPACE", namespace);
-        try {
-            var pod = client.pods().inNamespace(ownNamespace).withName(self);
-            Pod current = pod.get();
-            if (current == null) {
-                return "Own pod " + ownNamespace + "/" + self + " not found";
-            }
-            var containers = current.getSpec().getContainers();
-            String container =
-                containers.size() == 1
-                    ? containers.getFirst().getName()
-                    : System.getenv().getOrDefault("SMITHY_CONTAINER_NAME", "orchestrator");
-            return pod.inContainer(container).tailingLines(tailLines).getLog();
-        } catch (KubernetesClientException e) {
-            return "Failed to read own logs: " + e.getMessage();
-        }
+        return pods.ownLogs(tailLines);
     }
-
-    // ── Exec ─────────────────────────────────────────────────
 
     @Override
     public ExecResult exec(
@@ -265,228 +189,31 @@ public class KubernetesRuntime implements ContainerRuntime {
         byte[] stdin,
         Duration timeout
     ) {
-        var wrapped = wrap(command, environment, workdir);
-        RawResult raw;
-        if (stdin == null) {
-            raw = run(name, wrapped, timeout);
-        } else {
-            // The exec stdin channel is not usable here: with this client a
-            // command that writes to stdout after reading stdin hangs, and
-            // payloads above ~16 KiB are sometimes lost whole (kubectl handles
-            // both). So stdin is shipped to a file as arguments, and the
-            // command reads that file.
-            String file = "/tmp/.smithy-stdin-" + UUID.randomUUID();
-            raw = upload(name, file, stdin);
-            if (raw.exitCode == 0) {
-                var fromFile = new ArrayList<String>(List.of("sh", "-c", STDIN_FROM_FILE, file));
-                fromFile.addAll(wrapped);
-                raw = run(name, fromFile, timeout);
-            }
-        }
-        return new ExecResult(
-            raw.exitCode,
-            new String(raw.stdout, StandardCharsets.UTF_8),
-            new String(raw.stderr, StandardCharsets.UTF_8)
-        );
+        return pods.exec(podName(KubernetesNames.objectName(name)), command, environment, workdir, stdin, timeout);
     }
 
     @Override
     public byte[] execForBytes(String name, List<String> command, Duration timeout) {
-        var raw = run(name, command, timeout);
-        if (raw.exitCode != 0) {
-            throw new RuntimeException(
-                "exec failed (exit " +
-                    raw.exitCode +
-                    ") in " +
-                    name +
-                    ": " +
-                    command +
-                    "\nstderr: " +
-                    new String(raw.stderr, StandardCharsets.UTF_8)
-            );
-        }
-        return raw.stdout;
+        return pods.execForBytes(podName(KubernetesNames.objectName(name)), command, timeout);
     }
 
-    /**
-     * Kubernetes exec has no working-directory or environment flags. Both go in
-     * as positional arguments to a fixed script, so nothing a caller passes is
-     * ever interpolated into shell source.
-     */
     static List<String> wrap(List<String> command, Map<String, String> environment, String workdir) {
-        var env = new ArrayList<String>();
-        if (environment != null) {
-            environment.forEach((k, v) -> env.add(k + "=" + v));
-        }
-        var wrapped = new ArrayList<String>();
-        if (workdir != null) {
-            wrapped.addAll(List.of("sh", "-c", "cd \"$0\" && exec \"$@\"", workdir));
-        }
-        if (!env.isEmpty()) {
-            wrapped.add("env");
-            wrapped.addAll(env);
-        }
-        wrapped.addAll(command);
-        return wrapped;
-    }
-
-    private record RawResult(int exitCode, byte[] stdout, byte[] stderr) {}
-
-    /**
-     * Write {@code data} to {@code file} in base64 chunks passed as arguments,
-     * then check the size. A chunk stays well under Linux's 128 KiB limit on a
-     * single argument.
-     */
-    private RawResult upload(String name, String file, byte[] data) {
-        var encoder = Base64.getEncoder();
-        int offset = 0;
-        boolean first = true;
-        do {
-            int length = Math.min(UPLOAD_CHUNK, data.length - offset);
-            String chunk = encoder.encodeToString(java.util.Arrays.copyOfRange(data, offset, offset + length));
-            String redirect = first ? ">" : ">>";
-            var result = run(
-                name,
-                List.of("sh", "-c", "printf %s \"$1\" | base64 -d " + redirect + " \"$0\"", file, chunk),
-                STDIN_UPLOAD_TIMEOUT
-            );
-            if (result.exitCode != 0) return result;
-            offset += length;
-            first = false;
-        } while (offset < data.length);
-
-        var size = run(name, List.of("sh", "-c", "wc -c < \"$0\"", file), STDIN_UPLOAD_TIMEOUT);
-        String written = new String(size.stdout, StandardCharsets.UTF_8).strip();
-        if (size.exitCode != 0 || !written.equals(String.valueOf(data.length))) {
-            return new RawResult(
-                1,
-                new byte[0],
-                ("stdin upload to " + file + " wrote " + written + " of " + data.length + " bytes").getBytes(
-                    StandardCharsets.UTF_8
-                )
-            );
-        }
-        return size;
-    }
-
-    private RawResult run(String name, List<String> command, Duration timeout) {
-        String id = KubernetesNames.objectName(name);
-        Duration effective = timeout != null ? timeout : DEFAULT_TIMEOUT;
-        var out = new ByteArrayOutputStream();
-        var err = new ByteArrayOutputStream();
-        var closed = new CountDownLatch(1);
-
-        var container = client
-            .pods()
-            .inNamespace(namespace)
-            .withName(podName(id))
-            .inContainer(CONTAINER)
-            .writingOutput(out)
-            .writingError(err)
-            .usingListener(
-                new ExecListener() {
-                    @Override
-                    public void onClose(int code, String reason) {
-                        closed.countDown();
-                    }
-
-                    @Override
-                    public void onFailure(Throwable t, Response failureResponse) {
-                        closed.countDown();
-                    }
-                }
-            );
-
-        ExecWatch watch = null;
-        try {
-            watch = container.exec(command.toArray(String[]::new));
-            Integer code = watch.exitCode().get(effective.toMillis(), TimeUnit.MILLISECONDS);
-            // The status frame can arrive before the last output frames.
-            closed.await(STREAM_DRAIN.toMillis(), TimeUnit.MILLISECONDS);
-            return new RawResult(code == null ? 1 : code, out.toByteArray(), err.toByteArray());
-        } catch (TimeoutException e) {
-            return new RawResult(
-                124,
-                out.toByteArray(),
-                ("Timed out after " + effective).getBytes(StandardCharsets.UTF_8)
-            );
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            return new RawResult(130, out.toByteArray(), "Interrupted".getBytes(StandardCharsets.UTF_8));
-        } catch (ExecutionException | KubernetesClientException e) {
-            Throwable cause = e instanceof ExecutionException && e.getCause() != null ? e.getCause() : e;
-            return new RawResult(1, out.toByteArray(), describe(cause).getBytes(StandardCharsets.UTF_8));
-        } finally {
-            if (watch != null) watch.close();
-        }
-    }
-
-    private static String describe(Throwable t) {
-        return t.getClass().getSimpleName() + ": " + t.getMessage();
+        return PodExec.wrap(command, environment, workdir);
     }
 
     // ── Manifests ────────────────────────────────────────────
 
     static StatefulSet statefulSetFor(ContainerSpec spec, KubernetesRuntimeConfig config) {
         String id = KubernetesNames.objectName(spec.name());
-
-        var labels = new LinkedHashMap<String, String>();
-        spec
-            .labels()
-            .forEach((k, v) -> {
-                String value = KubernetesNames.labelValue(v);
-                if (!value.isEmpty()) labels.put(k, value);
-            });
-        labels.put(ID_LABEL, id);
-        var annotations = Map.of(NAME_ANNOTATION, spec.name());
-
-        var env = new ArrayList<EnvVar>();
-        spec.environment().forEach((k, v) -> env.add(new EnvVar(k, v == null ? "null" : v, null)));
-
-        var mounts = new ArrayList<VolumeMount>(
-            List.of(
-                mount(VOLUME, "/workspace", "workspace"),
-                mount(VOLUME, "/tmp", "tmp"),
-                mount(VOLUME, "/root", "root")
-            )
-        );
-        var volumes = new ArrayList<Volume>();
-        spec
-            .caches()
-            .forEach((cache, path) -> {
-                mounts.add(mount(cache, path, null));
-                volumes.add(
-                    new VolumeBuilder()
-                        .withName(cache)
-                        .withNewPersistentVolumeClaim()
-                        .withClaimName(cacheClaimName(cache))
-                        .endPersistentVolumeClaim()
-                        .build()
-                );
-            });
-
-        var resources = new ResourceRequirementsBuilder();
-        config
-            .resources()
-            .forEach((kind, values) -> {
-                var quantities = new LinkedHashMap<String, Quantity>();
-                values.forEach((resource, amount) -> quantities.put(resource, new Quantity(amount)));
-                if ("requests".equals(kind)) resources.withRequests(quantities);
-                if ("limits".equals(kind)) resources.withLimits(quantities);
-            });
+        var labels = TaskPods.labels(spec, id);
+        var annotations = TaskPods.annotations(spec);
 
         var claim = new PersistentVolumeClaimBuilder()
             .withNewMetadata()
             .withName(VOLUME)
             .withLabels(Map.of(MANAGED_LABEL, "true", ID_LABEL, id))
             .endMetadata()
-            .withNewSpec()
-            .withAccessModes("ReadWriteOnce")
-            .withStorageClassName(config.storageClass())
-            .withNewResources()
-            .withRequests(Map.of("storage", new Quantity(config.volumeSize())))
-            .endResources()
-            .endSpec()
+            .withSpec(TaskPods.claimSpec(config))
             .build();
 
         return new StatefulSetBuilder()
@@ -511,52 +238,18 @@ public class KubernetesRuntime implements ContainerRuntime {
             .withLabels(labels)
             .withAnnotations(annotations)
             .endMetadata()
-            .withNewSpec()
-            .withAutomountServiceAccountToken(false)
-            .withEnableServiceLinks(false)
-            // smithy-init ends in `sleep infinity`, which ignores SIGTERM as PID 1.
-            .withTerminationGracePeriodSeconds(5L)
-            .withImagePullSecrets(config.imagePullSecrets().stream().map(LocalObjectReference::new).toList())
-            .addNewInitContainer()
-            .withName("seed-root")
-            .withImage(spec.image())
-            .withCommand("sh", "-c", SEED_ROOT_SCRIPT)
-            .withVolumeMounts(mount(VOLUME, "/seed", null))
-            .endInitContainer()
-            .addNewContainer()
-            .withName(CONTAINER)
-            .withImage(spec.image())
-            .withArgs(spec.command())
-            .withWorkingDir("/workspace")
-            .withEnv(env)
-            .withVolumeMounts(mounts)
-            .withResources(resources.build())
-            .endContainer()
-            .withVolumes(volumes)
-            .endSpec()
+            .withSpec(TaskPods.podSpec(spec, config))
             .endTemplate()
             .endSpec()
             .build();
     }
 
     static PersistentVolumeClaim cacheClaimFor(String cache, KubernetesRuntimeConfig config) {
-        return new PersistentVolumeClaimBuilder()
-            .withNewMetadata()
-            .withName(cacheClaimName(cache))
-            .withLabels(Map.of(CACHE_LABEL, "true"))
-            .endMetadata()
-            .withNewSpec()
-            .withAccessModes(config.cacheAccessMode())
-            .withStorageClassName(config.storageClass())
-            .withNewResources()
-            .withRequests(Map.of("storage", new Quantity(config.cacheSize())))
-            .endResources()
-            .endSpec()
-            .build();
+        return TaskPods.cacheClaimFor(cache, config);
     }
 
     static String cacheClaimName(String cache) {
-        return "smithy-" + cache;
+        return TaskPods.cacheClaimName(cache);
     }
 
     static String podName(String id) {
@@ -567,18 +260,10 @@ public class KubernetesRuntime implements ContainerRuntime {
         return VOLUME + "-" + id + "-0";
     }
 
-    private static VolumeMount mount(String volume, String path, String subPath) {
-        return new VolumeMountBuilder().withName(volume).withMountPath(path).withSubPath(subPath).build();
-    }
-
     // ── Helpers ──────────────────────────────────────────────
 
     private void ensureCacheClaim(String cache) {
-        var claims = client.persistentVolumeClaims().inNamespace(namespace);
-        if (claims.withName(cacheClaimName(cache)).get() == null) {
-            claims.resource(cacheClaimFor(cache, config)).create();
-            log.info("Created cache claim {}", cacheClaimName(cache));
-        }
+        TaskNamespace.ensureCacheClaim(client, namespace, cache, config);
     }
 
     private StatefulSet statefulSet(String id) {
@@ -590,65 +275,19 @@ public class KubernetesRuntime implements ContainerRuntime {
     }
 
     private boolean awaitRunning(String id) {
-        try {
-            client
-                .pods()
-                .inNamespace(namespace)
-                .withName(podName(id))
-                .waitUntilCondition(KubernetesRuntime::isRunning, config.startTimeout(), TimeUnit.SECONDS);
-            return true;
-        } catch (KubernetesClientException e) {
-            return false;
-        }
+        return TaskNamespace.awaitRunning(client, namespace, podName(id), config.startTimeout());
     }
 
     private String podSummary(String id) {
-        Pod pod = pod(id);
-        if (pod == null || pod.getStatus() == null) return "No pod.";
-        var status = pod.getStatus();
-        var parts = new ArrayList<String>();
-        parts.add("phase=" + status.getPhase());
-        if (status.getContainerStatuses() != null) {
-            status
-                .getContainerStatuses()
-                .forEach(c -> {
-                    if (c.getState() != null && c.getState().getWaiting() != null) {
-                        parts.add(c.getName() + " waiting: " + c.getState().getWaiting().getReason());
-                    }
-                });
-        }
-        if (status.getConditions() != null) {
-            status
-                .getConditions()
-                .stream()
-                .filter(c -> "False".equals(c.getStatus()) && c.getMessage() != null)
-                .forEach(c -> parts.add(c.getType() + ": " + c.getMessage()));
-        }
-        return String.join("; ", parts);
+        return TaskPods.summary(pod(id));
     }
 
     static boolean isRunning(Pod pod) {
-        if (pod == null || pod.getStatus() == null || pod.getMetadata().getDeletionTimestamp() != null) {
-            return false;
-        }
-        if (!"Running".equals(pod.getStatus().getPhase()) || pod.getStatus().getContainerStatuses() == null) {
-            return false;
-        }
-        return pod
-            .getStatus()
-            .getContainerStatuses()
-            .stream()
-            .anyMatch(c -> CONTAINER.equals(c.getName()) && c.getState() != null && c.getState().getRunning() != null);
+        return TaskPods.isRunning(pod);
     }
 
     private static int replicas(StatefulSet set) {
         Integer replicas = set.getSpec().getReplicas();
         return replicas == null ? 1 : replicas;
-    }
-
-    private static String originalName(StatefulSet set) {
-        var annotations = set.getMetadata().getAnnotations();
-        String original = annotations == null ? null : annotations.get(NAME_ANNOTATION);
-        return original != null ? original : set.getMetadata().getName();
     }
 }
