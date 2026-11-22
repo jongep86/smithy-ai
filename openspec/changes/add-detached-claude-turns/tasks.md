@@ -20,9 +20,12 @@
 - [ ] 4.1 Add `ClaudeSession.cancel()` and use it from the dashboard path that cancels runs. Verify: test that the lock drops and `await` reports `DONE 143` or `LOST`.
 - [ ] 4.2 (Optional, separable) In the engine's post-restart sweep, attach to unfinished turns so a run waiting on a result progresses without a new event. Verify: restart test with a fake runtime holding a finished turn.
 
+- [ ] 4.3 Make suspend paths cancel or refuse while a turn is active. Verify: test that suspend with an active turn does not leave a lost turn.
+- [ ] 4.4 In the await loop, classify exec failures from `PodExec.describe` (401/403 permanent, others transient) and call `ensureRunning` while the pod is absent. Verify: tests with a runtime that fails with 403, and one whose pod returns after two failures.
+
 ## 5. Configuration and verification
 
 - [ ] 5.1 Add `agent.claude.detached`, `pollInterval`, `lostTurnRetries` to config, validation (positive durations), defaults (`false`, `20s`, `1`). Verify: config tests, including rejection of a zero interval.
 - [ ] 5.2 Docker integration test: start a detached turn with a stub `claude` that sleeps then prints JSON, kill the orchestrator-side client, attach from a new `ClaudeSession`, assert the result and that no second process started.
-- [ ] 5.3 Cluster verification on the Kubernetes and Sandbox backends: start a long turn, roll the orchestrator, assert the run completes without a comment; delete the pod mid-turn and assert one relaunch then a clear error on a second loss.
+- [ ] 5.3 Cluster verification on the Kubernetes and Sandbox backends (extend `KubernetesLifecycleIT`, which already selects the backend with `SMITHY_K8S_IT_BACKEND` and passed against agent-sandbox v1.0.12; run as the example ServiceAccount, not only as admin): start a long turn, roll the orchestrator, assert the run completes without a comment; delete the pod mid-turn and assert one relaunch then a clear error on a second loss.
 - [ ] 5.4 Docs: a short page on the flag, the files under `/tmp/smithy-turns`, and how to inspect a turn by hand.

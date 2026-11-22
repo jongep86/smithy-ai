@@ -16,6 +16,23 @@ Kubernetes and the container filesystem on Docker; `copyToContainer` and `execFo
 files in and out without stdin; `--resume <session-id>` plus the transcript under `/root/.claude`
 makes a repeated turn continue; the images are Debian based.
 
+Live findings from the cluster test of `add-agent-sandbox-runtime` (agent-sandbox v1.0.12, PR #6) that
+shape this design:
+
+- Files on the task volume (`/tmp`, `/workspace`, `/root`, the state file) survive pod deletion and
+  the controller recreates the pod. So turn files outlive a lost pod, and "lost" is detectable and
+  recoverable, but the process itself does not survive.
+- Exec as the orchestrator's own ServiceAccount needs `get` as well as `create` on `pods/exec`
+  (fabric8 opens exec as a WebSocket upgrade). The example Role now has both; detached turns make
+  many more short execs, so this must hold for the polling path too.
+- A failed exec used to surface as an opaque `KubernetesClientException`; `PodExec.describe` now
+  names the cause (for example HTTP 403). The await loop can tell a permanent failure from a
+  transient one.
+- Large payloads work: a 512 KiB stdin upload arrived whole, so the prompt upload needs no change.
+- `maxLifetime` makes the controller delete the Sandbox, pod and claim on its own, and
+  `failedPodPolicy: Recreate` replaces a failed pod with backoff of 5 s, 10 s, 20 s.
+- `operatingMode: Suspended` deletes the pod.
+
 ## Goals / Non-Goals
 
 **Goals:**
@@ -87,7 +104,11 @@ while [ ! -f $d/rc ] && [ $i -lt <pollInterval> ]; do
 
 One call = one status word. The orchestrator loops until `DONE` or `LOST` or its own deadline.
 Reading the lock inside the loop is why `LOST` is prompt. A failed `exec` (API server restart,
-network) is retried with backoff and does not affect the turn. Why long-poll rather than a tight
+network, pod being recreated) is retried with backoff and does not affect the turn, but only while
+the cause is transient: an authorization failure (HTTP 401/403, as found live with an incomplete
+Role) fails the await at once with the cause from `PodExec.describe`, instead of retrying until the
+deadline. While the pod is absent or not running, the loop calls `ensureRunning` rather than
+reporting `LOST`: a turn is lost only when the exec succeeds, the lock is free and `rc` is absent. Why long-poll rather than a tight
 poll: it costs one exec per ~20 s per running turn rather than one per second, and it returns
 promptly at the end of a turn.
 
@@ -145,7 +166,9 @@ and is separable.
 
 ### 5. Lost turns are retried once, then fail loudly
 
-A lost turn (no lock, no `rc`) means the process died with its pod or was killed. The session
+The relaunch waits for the pod first: on the sandbox backend the controller recreates a pod
+within seconds to a minute (backoff 5 s, 10 s, 20 s under `failedPodPolicy: Recreate`), and a
+relaunch exec against a missing pod would fail for the wrong reason. A lost turn (no lock, no `rc`) means the process died with its pod or was killed. The session
 transcript on the volume is intact up to the last write, so `--resume` continues it. `attempts` is
 incremented and one relaunch is allowed (`agent.claude.lostTurnRetries`, default 1); the next loss
 throws `ClaudeTurnLostException` with the turn directory and the last 2 KiB of `err`. This replaces
@@ -159,7 +182,16 @@ reset: a relaunch gets the remaining budget, and a turn past its deadline is rep
 dashboard path that reports `ClaudeTimeoutException` keeps working unchanged. Removing a container
 removes its turns with it.
 
-### 7. Rollout flag and the no-op path
+### 7. Interaction with suspend, expiry and removal
+
+`Suspended` and `maxLifetime` expiry remove the pod, so they end a running turn. The runtime
+callers that suspend (`stop`-style paths) SHALL cancel an active turn first, or refuse while one is
+running; they must not silently produce a lost turn. `maxLifetime` is not aware of turns: an
+operator who enables it must set it above the longest turn budget plus the longest human wait. A
+turn found after the Sandbox was recreated from nothing (claim gone) has no files and is simply
+absent, which is the existing "container not found" path.
+
+### 8. Rollout flag and the no-op path
 
 `agent.claude.detached: false` keeps the current single-stream `execute` untouched, behind one
 `if`, so the change is reversible by configuration. Default flips to `true` one release later, after

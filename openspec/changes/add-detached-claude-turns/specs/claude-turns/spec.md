@@ -95,3 +95,20 @@ container is removed.
 
 - **WHEN** a new turn starts on a container
 - **THEN** directories of earlier turns are removed
+
+### Requirement: Observation survives a recreated pod, not a permission error
+
+While a turn is observed, an exec failure with a transient cause (pod absent, connection lost)
+SHALL be retried and SHALL NOT mark the turn lost. An authorization failure SHALL fail the
+observation at once with its cause. Suspending a container SHALL NOT be done while a turn is
+active unless that turn is cancelled first.
+
+#### Scenario: Pod being recreated
+
+- **WHEN** the task pod is deleted and the controller recreates it while a turn is observed
+- **THEN** the observation waits for the pod, and the turn is reported lost only if the pod comes back without the process
+
+#### Scenario: Missing exec permission
+
+- **WHEN** observation exec fails with HTTP 403
+- **THEN** the observation fails immediately and the error names the status
