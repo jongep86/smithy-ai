@@ -1,0 +1,43 @@
+# Task pods run code an agent wrote and hold VCS and Claude tokens: DNS, the
+# internet and the knowledgebase, nothing else in the cluster, and nothing in.
+# The orchestrator reaches them through the API server (pods/exec), which this
+# policy does not touch.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: task-pods
+  namespace: smithy-tasks
+spec:
+  podSelector:
+    matchLabels:
+      smithy.managed: "true"
+  policyTypes: [Ingress, Egress]
+  ingress: []
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - {protocol: UDP, port: 53}
+        - {protocol: TCP, port: 53}
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: smithy
+          podSelector:
+            matchLabels:
+              app: smithy-knowledgebase
+      ports:
+        - {protocol: TCP, port: 8080}
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 100.64.0.0/10

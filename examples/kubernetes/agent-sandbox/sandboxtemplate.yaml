@@ -1,0 +1,45 @@
+# Platform-side defaults for Sandboxes in the task namespace. The orchestrator
+# creates plain Sandboxes and does not reference a template (v1beta1 has no
+# templateRef on a Sandbox); a template is what a SandboxWarmPool or a
+# SandboxClaim consumes. It is kept here as the documented shape of a task pod
+# for a platform that wants to pre-warm the image or enforce a RuntimeClass.
+apiVersion: extensions.agents.x-k8s.io/v1beta1
+kind: SandboxTemplate
+metadata:
+  name: smithy-task
+  namespace: smithy-tasks
+spec:
+  envVarsInjectionPolicy: Allowed
+  volumeClaimTemplatesPolicy: Allowed
+  networkPolicyManagement: Unmanaged   # networkpolicy.yaml covers the namespace
+  volumeClaimTemplates:
+    - metadata:
+        name: task
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests:
+            storage: 10Gi
+  podTemplate:
+    metadata:
+      labels:
+        smithy.managed: "true"
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 5
+      # runtimeClassName: gvisor
+      securityContext:
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: task
+          image: ghcr.io/smithy-ai/claude-task-default:dev
+          args: [smithy-init]
+          workingDir: /workspace
+          resources:
+            requests: {cpu: 500m, memory: 1Gi}
+            limits: {memory: 4Gi}
+          volumeMounts:
+            - {name: task, mountPath: /workspace, subPath: workspace}
+            - {name: task, mountPath: /tmp, subPath: tmp}
+            - {name: task, mountPath: /root, subPath: root}
