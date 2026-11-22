@@ -249,7 +249,17 @@ final class PodExec {
         }
     }
 
-    private static String describe(Throwable t) {
-        return t.getClass().getSimpleName() + ": " + t.getMessage();
+    /**
+     * The exception and what caused it, each named once. fabric8 wraps a refused
+     * WebSocket upgrade in a generic "An error has occurred"; the HTTP status
+     * and the API server's reason sit in the causes.
+     */
+    static String describe(Throwable t) {
+        var parts = new ArrayList<String>();
+        for (Throwable c = t; c != null && parts.size() < 5; c = c.getCause() == c ? null : c.getCause()) {
+            String part = c.getClass().getSimpleName() + ": " + c.getMessage();
+            if (!parts.contains(part)) parts.add(part);
+        }
+        return String.join("; caused by ", parts);
     }
 }

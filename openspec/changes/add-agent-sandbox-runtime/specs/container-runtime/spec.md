@@ -49,6 +49,13 @@ service account token.
 - **WHEN** a command in a task container lists `/var/run/secrets/kubernetes.io/serviceaccount`
 - **THEN** the directory does not exist
 
+#### Scenario: Exec as the orchestrator account
+
+- **WHEN** the orchestrator runs a command in a task pod with only the example Role in the task
+  namespace
+- **THEN** the exec succeeds: the Role grants `get` as well as `create` on `pods/exec`, because the
+  client opens exec as a WebSocket upgrade, which the API server authorizes as `get`
+
 #### Scenario: Sandbox backend without StatefulSet rights
 
 - **WHEN** the orchestrator runs with `backend: sandbox` under a Role that grants no access to
