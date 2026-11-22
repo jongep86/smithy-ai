@@ -131,6 +131,60 @@ class OrchestratorConfigTest {
         );
     }
 
+    @Test
+    void sandboxBackendSelectsTheSandboxRuntime() throws Exception {
+        var beans = new dev.smithyai.orchestrator.service.docker.ContainerRuntimeConfiguration();
+        var loader = new ConfigLoader(environmentFor(config(secret()).replace(DOCKER_BLOCK, SANDBOX_BLOCK)));
+        var cli = new dev.smithyai.orchestrator.testing.FakeDockerCli();
+
+        var kubernetes = loader.orchestratorConfig().runtime().kubernetes();
+        assertEquals("sandbox", kubernetes.backend());
+        assertTrue(kubernetes.usesSandbox());
+        assertEquals("gvisor", kubernetes.runtimeClassName());
+        assertEquals(86400, kubernetes.maxLifetime());
+        assertEquals("Recreate", kubernetes.failedPodPolicy());
+        assertInstanceOf(
+            dev.smithyai.orchestrator.service.docker.SandboxRuntime.class,
+            beans.containerRuntime(loader.orchestratorConfig(), cli, loader.dockerConfig())
+        );
+    }
+
+    @Test
+    void statefulSetIsTheDefaultKubernetesBackend() throws Exception {
+        var loader = new ConfigLoader(environmentFor(config(secret()).replace(DOCKER_BLOCK, KUBERNETES_BLOCK)));
+
+        var kubernetes = loader.orchestratorConfig().runtime().kubernetes();
+        assertEquals("statefulset", kubernetes.backend());
+        assertFalse(kubernetes.usesSandbox());
+        assertNull(kubernetes.maxLifetime());
+    }
+
+    @Test
+    void unknownKubernetesBackendIsRejected() throws Exception {
+        String unknown = config(secret()).replace(
+            DOCKER_BLOCK,
+            SANDBOX_BLOCK.replace("backend: sandbox", "backend: job")
+        );
+
+        var error = assertThrows(IllegalStateException.class, () -> new ConfigLoader(environmentFor(unknown)));
+
+        assertEquals(
+            "runtime.kubernetes.backend must be one of [statefulset, sandbox] in orchestrator.yml",
+            error.getMessage()
+        );
+    }
+
+    private static final String SANDBOX_BLOCK = """
+        runtime:
+          kubernetes:
+            namespace: smithy-tasks
+            taskImage: task:k8s
+            backend: sandbox
+            runtimeClassName: gvisor
+            maxLifetime: 86400
+            failedPodPolicy: Recreate
+        """;
+
     private static final String DOCKER_BLOCK = """
         runtime:
           docker:
