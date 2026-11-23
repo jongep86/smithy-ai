@@ -127,6 +127,12 @@ public class RunTakeover {
             .tryInRun(run.id(), BUSY_WAIT, () -> {
                 var container = environments.container(run);
                 var agent = environments.agent(run, toolsFor(tools));
+                // The run lock lives in this process. A detached turn started
+                // before a restart holds no lock here, but is just as busy.
+                if (agent.hasRunningTurn()) {
+                    store.appendEvent(run.id(), "takeover.message.busy", Map.of("length", text.length()));
+                    throw new AgentBusyException(run.id());
+                }
                 agent.setTurnTimeout(turnTimeout);
                 String reply = agent.send(text);
                 environments.rememberAgentSession(container, agent);

@@ -33,6 +33,72 @@ shape this design:
   `failedPodPolicy: Recreate` replaces a failed pod with backoff of 5 s, 10 s, 20 s.
 - `operatingMode: Suspended` deletes the pod.
 
+## Spike result (task 1.1): passed
+
+Run on 2026-11-23 with the real task image (`claude-task-go`, Ubuntu 24.04, PID 1 `sleep infinity`
+as left by `smithy-init`) and a stub in place of claude that reads stdin, sleeps, then prints JSON.
+The launcher was the one in Decision 1, plus a `linger` argument that keeps the exec open after the
+launch so the client can be killed while the stream is still live.
+
+| Case | Docker 29 (Linux host) | Kubernetes 1.36, containerd, via `kubectl exec` | Kubernetes, via the orchestrator's own `PodExec` (fabric8) |
+| --- | --- | --- | --- |
+| Kill the exec client (`kill -9`) 3 s into an open exec, re-exec | turn `RUNNING`, then `DONE 0`, `out` complete | same | JVM `kill -9`'d 6 s in; a new JVM saw `RUNNING`, one stub process, then `DONE 0` |
+| `kill -9` the exec's own process group inside the container | `RUNNING`, then `DONE 0` | n/a | n/a |
+| SIGTERM to the turn (cancel) | `DONE 143` | not repeated | not repeated |
+| SIGKILL of the whole turn session (OOM / pod death of the process) | `LOST` | not repeated | not repeated |
+| Budget 3 s on a 60 s turn | `DONE 124` | not repeated | not repeated |
+| Second launcher for the same directory | starts nothing | not repeated | not repeated |
+| Status of a directory that was never launched | `NONE` | not repeated | not repeated |
+
+Two findings that shape the implementation:
+
+- On this cluster even a plain background child **without** `setsid` and with stderr on the exec
+  stream survived the client being killed: containerd keeps an exec running when its stream goes.
+  The opposite observation that motivated this change was not reproduced. `setsid` plus files for
+  stdio stay, as defence in depth for runtimes that do signal the exec's group.
+- PID 1 in the task container (`sleep infinity`) does not reap. Every finished turn leaves at least one
+  zombie entry (the orphaned launcher shell, plus anything claude itself orphans). Zombies hold no
+  memory or files and do not affect the lock, but they count against the pod's pid limit, so this
+  takes thousands of turns per container to matter. A reaping init (`tini`, or `docker run --init`)
+  in the task image is the clean fix and is left as a follow-up.
+
+The scripts are now covered by `DetachedTurnScriptTest` (real `sh`, `flock`, `setsid`, `timeout` on
+the build host, including killing the exec's process tree after launch), `DetachedTurnDockerIT`
+(Docker) and two cases in `KubernetesLifecycleIT` (StatefulSet and Sandbox backends).
+
+## Implementation notes (where the code differs from the decisions above)
+
+- **No `cd` into the turn directory.** Claude must run in `/workspace` (the exec workdir); the
+  launcher uses absolute paths for its files instead.
+- **`pid` holds the pid of `timeout`, and cancel signals its process group.** GNU `timeout` puts
+  itself in a new process group, so the launcher's own pgid would miss claude. `kill -TERM -<pid>`
+  reaches `timeout` and claude; `timeout` then exits 143, which the waiting shell writes to `rc`.
+- **Status has a fourth word, `NONE`**: no `pid` and no `rc`. That is "recorded but never
+  launched" (crash between the state write and the launch, Decision 3), which is started under the
+  recorded id. During a wait, `NONE` (the directory is gone, the volume was replaced) is treated
+  as lost.
+- **A relaunch gets a new turn id** (and directory), `attempts + 1`, the same hash and deadline.
+  It uses `--resume` only when the session transcript exists, because a turn lost before claude
+  wrote it would otherwise fail on "no conversation found".
+- **The prompt is written with `umask 077; cat >`**, not `copyToContainer` (which leaves 0644).
+  On Kubernetes it still travels through `PodExec`'s chunked upload.
+- **A new turn stops every other live turn in the container first** (`PREPARE`), whatever the
+  state file says, then deletes their directories. The state file is read-modify-written from disk
+  for every turn write, but another `ContainerSession` with a stale cache can still overwrite it;
+  this guard keeps "never two turns on one session" true even then.
+- **Observation failures**: 401/403 (as `PodExec.describe` reports them) fail at once; anything
+  else is retried with backoff (1 s doubling, capped at `pollInterval`) and `ensureRunning` in
+  between; after three failures a container that no longer exists stops the wait.
+- **Run cancel** (`RunEnvironments.destroyContainer`, used by the dashboard) stops the active turn
+  before removing the container when the flag is on.
+- **Suspend (Decision 7)**: no orchestrator code path suspends a Sandbox today (`SandboxRuntime`
+  only resumes one in `start`), so there is nothing to guard yet. Any future suspend path must call
+  `ClaudeSession.cancelActiveTurn` first.
+- **Takeover messages** check `ClaudeSession.hasRunningTurn()` and answer busy (409) when a
+  detached turn runs: the run lock is in-process, so after a restart it no longer covers a turn
+  started before it, and the attach rules would otherwise stop that turn for the person's prompt.
+- The engine sweep that attaches to unfinished turns without a new event (task 4.2) is not built.
+
 ## Goals / Non-Goals
 
 **Goals:**
@@ -199,7 +265,8 @@ the cluster verification in task 5. With the flag off no new state is written.
 
 ## Risks / Trade-offs
 
-- [The detach claim is wrong on some runtime] -> Task 1.1 is a spike gate on Docker and
+- [Zombies] PID 1 of the task image does not reap; see the spike result. Follow-up: a reaping init.
+- [The detach claim is wrong on some runtime] -> Passed on Docker and Kubernetes (see Spike result). Task 1.1 was a spike gate on Docker and
   Kubernetes (kill the client mid-turn, assert the process lives). If `setsid` is not enough,
   the fallbacks are `nohup` with `disown`, or starting the launcher through the container's init;
   the design above is otherwise unchanged.

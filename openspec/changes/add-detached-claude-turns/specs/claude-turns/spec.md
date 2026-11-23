@@ -41,6 +41,12 @@ run at a time: a request with a different hash SHALL first cancel the unfinished
 - **WHEN** a turn is requested on a session whose recorded turn is running with a different hash
 - **THEN** the recorded turn is cancelled and its lock released before the new turn starts
 
+#### Scenario: Person's message while a turn runs
+
+- **WHEN** a person sends a takeover message while a detached turn is running on the run's container,
+  including one started before an orchestrator restart
+- **THEN** the message is refused as busy and the running turn is not cancelled
+
 #### Scenario: Finished and collected turn
 
 - **WHEN** a turn has already been collected and the same prompt is requested again

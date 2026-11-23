@@ -70,6 +70,11 @@ public class ContainerSession {
         return service.containerExists(containerName);
     }
 
+    /** Start the container if it exists but is stopped; false when it cannot be brought up. */
+    public boolean ensureRunning() {
+        return service.ensureRunning(containerName);
+    }
+
     // ── Container operations ───────────────────────────────
 
     public ExecResult exec(String... command) {

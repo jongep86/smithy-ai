@@ -3,11 +3,21 @@ package dev.smithyai.orchestrator.testing;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
+import dev.smithyai.orchestrator.config.BotConfig;
+import dev.smithyai.orchestrator.config.ClaudeConfig;
+import dev.smithyai.orchestrator.config.DockerConfig;
 import dev.smithyai.orchestrator.config.RuntimeConfig.KubernetesRuntimeConfig;
+import dev.smithyai.orchestrator.config.VcsProviderConfig;
+import dev.smithyai.orchestrator.service.claude.ClaudeSession;
+import dev.smithyai.orchestrator.service.claude.ClaudeTurnLostException;
 import dev.smithyai.orchestrator.service.docker.ContainerRuntime;
+import dev.smithyai.orchestrator.service.docker.ContainerService;
+import dev.smithyai.orchestrator.service.docker.ContainerSession;
 import dev.smithyai.orchestrator.service.docker.KubernetesRuntime;
 import dev.smithyai.orchestrator.service.docker.SandboxRuntime;
+import dev.smithyai.orchestrator.service.docker.dto.ActiveTurn;
 import dev.smithyai.orchestrator.service.docker.dto.ContainerSpec;
+import dev.smithyai.orchestrator.service.docker.dto.ContainerState;
 import io.fabric8.kubernetes.api.model.GenericKubernetesResource;
 import io.fabric8.kubernetes.client.KubernetesClient;
 import io.fabric8.kubernetes.client.KubernetesClientBuilder;
@@ -18,6 +28,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
@@ -37,7 +48,9 @@ import org.junit.jupiter.api.TestMethodOrder;
  * {@link SandboxRuntime} and a cluster with agent-sandbox installed; the tests
  * that only make sense there (claim naming, suspend, expiry, the Ready
  * condition in a start timeout) are skipped on the StatefulSet backend.
- * {@code SMITHY_K8S_IT_FAILED_POD_POLICY} is passed through when set. It uses a
+ * {@code SMITHY_K8S_IT_FAILED_POD_POLICY} is passed through when set. The
+ * detached-turn cases need GNU coreutils and util-linux, so they run their own
+ * container from {@code SMITHY_K8S_IT_TURN_IMAGE} (default {@code ubuntu:24.04}). The rest uses a
  * plain busybox image, so it tests the runtime, not the task image.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
@@ -47,6 +60,35 @@ class KubernetesLifecycleIT {
     private static final String NAME = "smithy-it_lifecycle.1";
     private static final String TIMEOUT_NAME = "smithy-it_lifecycle.timeout";
     private static final String EXPIRY_NAME = "smithy-it_lifecycle.expiry";
+    private static final String TURN_NAME = "smithy-it_lifecycle.turn";
+
+    /**
+     * Image for the detached-turn tests: needs GNU timeout, flock and setsid,
+     * which busybox lacks. Any claude-task image, or plain Ubuntu.
+     */
+    private static final String TURN_IMAGE = Optional.ofNullable(System.getenv("SMITHY_K8S_IT_TURN_IMAGE")).orElse(
+        "ubuntu:24.04"
+    );
+
+    /**
+     * Installs a stub claude from $STUB on every start (the image filesystem
+     * does not survive a recreated pod, /tmp on the task volume does), then idles.
+     */
+    private static final List<String> INSTALL_STUB_AND_SLEEP = List.of(
+        "sh",
+        "-c",
+        "printf '%s' \"$STUB\" > /usr/bin/claude && chmod +x /usr/bin/claude && mkdir -p /workspace && " +
+            "touch /tmp/smithy-init-done && exec sleep 2147483647"
+    );
+
+    /** Counts its starts on the volume, reads the prompt, works, answers in JSON. */
+    private static final String STUB = """
+        #!/bin/sh
+        echo start >> /tmp/stub-starts
+        p=$(cat)
+        sleep "$(cat /tmp/stub-secs 2>/dev/null || echo 5)"
+        printf '{"result":"answer to %s"}' "$p"
+        """;
     private static final String IMAGE = "busybox:1.37";
     private static final List<String> INIT_AND_SLEEP = List.of(
         "sh",
@@ -77,6 +119,7 @@ class KubernetesLifecycleIT {
         runtime.remove(NAME);
         runtime.remove(TIMEOUT_NAME);
         runtime.remove(EXPIRY_NAME);
+        runtime.remove(TURN_NAME);
     }
 
     @AfterAll
@@ -85,7 +128,9 @@ class KubernetesLifecycleIT {
             runtime.remove(NAME);
             runtime.remove(TIMEOUT_NAME);
             runtime.remove(EXPIRY_NAME);
+            runtime.remove(TURN_NAME);
         }
+        ClaudeSession.configureDetached(ClaudeSession.DetachedSettings.OFF);
         if (client != null) client.close();
     }
 
@@ -280,6 +325,137 @@ class KubernetesLifecycleIT {
             .withName("task-" + id)
             .waitUntilCondition(c -> c == null, 60, TimeUnit.SECONDS);
         assertNull(client.pods().inNamespace(namespace).withName(id).get(), "its pod went with it");
+    }
+
+    // ── Detached Claude turns ────────────────────────────────
+
+    @Test
+    @Order(30)
+    void aDetachedTurnOutlivesTheOrchestratorThatStartedIt() {
+        createTurnContainer();
+        ClaudeSession.configureDetached(new ClaudeSession.DetachedSettings(true, Duration.ofSeconds(3), 1));
+
+        // First orchestrator: launches the turn, then dies.
+        var dead = new AtomicBoolean(false);
+        var first = new ClaudeSession(turnSession(new DyingRuntime(runtime, dead)), List.of("Read"));
+        first.setModel("m");
+        assertThrows(DyingRuntime.OrchestratorDied.class, () -> first.send("the question"));
+        assertTrue(dead.get());
+        var c = turnSession(runtime);
+        assertEquals(ActiveTurn.Phase.LAUNCHED, c.readState().activeTurn().phase());
+
+        // Second orchestrator, fresh session object: attaches, no second process.
+        var second = new ClaudeSession(turnSession(runtime), List.of("Read"));
+        second.setModel("m");
+        assertEquals("answer to the question", second.send("the question"));
+        assertEquals(first.getSessionId(), second.getSessionId());
+        assertEquals("start\n", exec(TURN_NAME, "cat /tmp/stub-starts"));
+        assertEquals(ActiveTurn.Phase.COLLECTED, c.readState().activeTurn().phase());
+    }
+
+    @Test
+    @Order(31)
+    void aTurnWhosePodIsDeletedIsRelaunchedOnceThenReportedLost() throws Exception {
+        createTurnContainer();
+        ClaudeSession.configureDetached(new ClaudeSession.DetachedSettings(true, Duration.ofSeconds(3), 1));
+        exec(TURN_NAME, "rm -f /tmp/stub-starts; echo 120 > /tmp/stub-secs");
+
+        // Delete the pod each time a turn has started, twice.
+        var deletions = new java.util.concurrent.atomic.AtomicInteger();
+        var killer = new Thread(() -> {
+            for (int i = 1; i <= 2; i++) {
+                long until = System.currentTimeMillis() + TimeUnit.MINUTES.toMillis(4);
+                while (System.currentTimeMillis() < until) {
+                    try {
+                        var starts = runtime.exec(
+                            TURN_NAME,
+                            List.of("sh", "-c", "wc -l < /tmp/stub-starts"),
+                            null,
+                            null,
+                            null,
+                            null
+                        );
+                        if (starts.exitCode() == 0 && Integer.parseInt(starts.stdout().strip()) >= i) {
+                            client.pods().inNamespace(namespace).withName(podOf(TURN_NAME)).delete();
+                            deletions.incrementAndGet();
+                            break;
+                        }
+                        Thread.sleep(1000);
+                    } catch (InterruptedException e) {
+                        return;
+                    } catch (RuntimeException | AssertionError e) {
+                        // pod between lives
+                    }
+                }
+            }
+        });
+        killer.start();
+
+        var session = new ClaudeSession(turnSession(runtime), List.of("Read"));
+        session.setModel("m");
+        var thrown = assertThrows(ClaudeTurnLostException.class, () -> session.send("doomed"));
+        killer.join(TimeUnit.MINUTES.toMillis(1));
+
+        assertEquals(2, deletions.get());
+        assertEquals(2, thrown.getAttempts());
+        assertEquals(
+            "start\nstart\n",
+            exec(TURN_NAME, "cat /tmp/stub-starts"),
+            "one relaunch on the recreated pod, not more"
+        );
+        assertEquals(ActiveTurn.Phase.COLLECTED, turnSession(runtime).readState().activeTurn().phase());
+
+        runtime.remove(TURN_NAME);
+    }
+
+    private void createTurnContainer() {
+        if (runtime.exists(TURN_NAME)) runtime.remove(TURN_NAME);
+        runtime.create(
+            new ContainerSpec(
+                TURN_NAME,
+                TURN_IMAGE,
+                INSTALL_STUB_AND_SLEEP,
+                Map.of("smithy.managed", "true", "smithy.workflow", "it"),
+                Map.of(),
+                Map.of("STUB", STUB)
+            )
+        );
+        turnSession(runtime).writeState(ContainerState.init("it", "plan"));
+    }
+
+    private ContainerSession turnSession(ContainerRuntime through) {
+        var service = new ContainerService(
+            new DockerConfig("docker", "none", TURN_IMAGE, null),
+            new ClaudeConfig("it-token", null, "m"),
+            new VcsProviderConfig(
+                "forgejo",
+                null,
+                new VcsProviderConfig.ForgejoProviderConfig(
+                    "http://forgejo.invalid",
+                    "http://forgejo.invalid",
+                    null,
+                    "t",
+                    "t",
+                    "t"
+                ),
+                null,
+                null,
+                null
+            ),
+            new BotConfig(
+                new BotConfig.BotEntry("smithy", "smithy@localhost"),
+                new BotConfig.BotEntry("architect", "architect@localhost"),
+                new BotConfig.BotEntry("coordinator", "coordinator@localhost")
+            ),
+            through
+        );
+        return new ContainerSession(TURN_NAME, service);
+    }
+
+    private String exec(String container, String script) {
+        var r = runtime.exec(container, List.of("sh", "-c", script), null, null, null, null);
+        assertEquals(0, r.exitCode(), r.stderr());
+        return r.stdout();
     }
 
     // ── Helpers ──────────────────────────────────────────────
