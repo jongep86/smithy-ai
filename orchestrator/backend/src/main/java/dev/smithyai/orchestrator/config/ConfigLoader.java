@@ -31,12 +31,21 @@ public class ConfigLoader {
             claude.validate();
             ClaudeSession.configureDefaultModel(claude.resolvedModel());
             config.agent().claude().resolvedTurnTimeout().ifPresent(ClaudeSession::configureTurnTimeout);
+            var agentClaude = config.agent().claude();
+            ClaudeSession.configureDetached(
+                new ClaudeSession.DetachedSettings(
+                    agentClaude.resolvedDetached(),
+                    agentClaude.resolvedPollInterval(),
+                    agentClaude.resolvedLostTurnRetries()
+                )
+            );
             log.info(
-                "Loaded orchestrator config (connectors={}, defaultVcs={}, model={}, turnTimeout={})",
+                "Loaded orchestrator config (connectors={}, defaultVcs={}, model={}, turnTimeout={}, detachedTurns={})",
                 config.connectors().keySet(),
                 config.defaults().vcs(),
                 claude.resolvedModel(),
-                ClaudeSession.turnTimeout()
+                ClaudeSession.turnTimeout(),
+                ClaudeSession.detachedSettings()
             );
         } catch (IOException e) {
             throw new UncheckedIOException("Failed to parse orchestrator config", e);

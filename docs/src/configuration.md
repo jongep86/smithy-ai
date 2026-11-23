@@ -27,6 +27,9 @@ agent:
     turnTimeout: 60m          # budget for one agent turn; overrunning turns are killed
     takeoverTimeout: 5m       # budget for a turn a human drove from the dashboard
     takeoverTools: [Read, Glob, Grep, Bash, Edit, Write, WebFetch]
+    detached: false           # run turns detached from their exec stream (see below)
+    pollInterval: 20s         # longest single observation of a detached turn
+    lostTurnRetries: 1        # relaunches of a turn whose process vanished
 
 auth:
   admin:
@@ -127,6 +130,59 @@ allowed": the CLI is run without `--allowedTools`, and a headless turn on defaul
 permissions then refuses every tool call before executing it. The agent reports
 that it cannot read a file or push a branch, which reads as an agent refusing to
 cooperate rather than one that was handed no permissions.
+
+## Detached turns
+
+By default a turn lives exactly as long as the `exec` call that runs it: when
+the orchestrator restarts mid-turn, Kubernetes ends the turn with the stream,
+and Docker leaves an orphan that keeps writing the session transcript while the
+orchestrator has lost its result. `agent.claude.detached: true` runs each turn
+as its own process in the task container instead:
+
+- the prompt is uploaded as a file, and a short `exec` starts the turn with
+  `setsid`, its stdin, stdout and stderr on files, and returns at once;
+- the orchestrator then observes it with short calls of at most
+  `pollInterval` each (default `20s`), never one stream for the whole turn;
+- the turn is recorded in the run state (`activeTurn`), so a step that is run
+  again after a restart attaches to the turn still running for the same
+  prompt instead of starting a second one;
+- a turn whose process disappeared without an exit status (its pod was
+  recreated, the kernel killed it) is relaunched with `--resume` and the
+  remaining budget, at most `lostTurnRetries` times (default `1`), then fails
+  with `Claude turn on <container> was lost <n> time(s)` naming the turn
+  directory and the end of its stderr.
+
+The budget (`turnTimeout`) is still enforced inside the container, and exit
+status 124 is still a timeout. An observation that fails with HTTP 401/403 fails
+the step at once (check the `pods/exec` verbs: fabric8 needs `get` as well as
+`create`); other failures, such as a pod being recreated, are retried. Off is
+exactly the old behaviour; no turn state is written.
+
+A turn is a directory in the task container, `/tmp/smithy-turns/<turn-id>/`,
+private to the task user. Only the latest turn's directory is kept; the next
+turn removes it, and stops any older turn still running first.
+
+| File | What it holds |
+| --- | --- |
+| `prompt` | the prompt, read by claude as stdin |
+| `cmd` | the command line, one argument per line |
+| `out`, `err` | claude's stdout (the JSON result) and stderr |
+| `lock` | held with `flock` while any process of the turn lives |
+| `pid` | pid of the `timeout` process, leader of the turn's process group |
+| `rc` | exit status, written last |
+
+To look at a turn by hand:
+
+```sh
+d=$(ls -dt /tmp/smithy-turns/*/ | head -1)
+flock -n "$d/lock" true && echo "not running" || echo "running"
+cat "$d/rc" 2>/dev/null        # absent while running, or if the turn was lost
+tail "$d/err"
+kill -TERM -- -"$(cat "$d/pid")"   # stop it; rc becomes 143
+```
+
+Needs `flock`, `setsid` and `timeout` in the task image (util-linux and
+coreutils; every `claude-task-*` image has them, and the base image build checks).
 
 ## Secrets
 
