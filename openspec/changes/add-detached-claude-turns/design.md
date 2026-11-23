@@ -60,7 +60,7 @@ Two findings that shape the implementation:
   zombie entry (the orphaned launcher shell, plus anything claude itself orphans). Zombies hold no
   memory or files and do not affect the lock, but they count against the pod's pid limit, so this
   takes thousands of turns per container to matter. A reaping init (`tini`, or `docker run --init`)
-  in the task image is the clean fix and is left as a follow-up.
+  in the task image is the clean fix and is left as a follow-up (task 6.1).
 
 The scripts are now covered by `DetachedTurnScriptTest` (real `sh`, `flock`, `setsid`, `timeout` on
 the build host, including killing the exec's process tree after launch), `DetachedTurnDockerIT`
@@ -265,7 +265,7 @@ the cluster verification in task 5. With the flag off no new state is written.
 
 ## Risks / Trade-offs
 
-- [Zombies] PID 1 of the task image does not reap; see the spike result. Follow-up: a reaping init.
+- [Zombies] PID 1 of the task image does not reap; see the spike result. Follow-up: a reaping init (task 6.1).
 - [The detach claim is wrong on some runtime] -> Passed on Docker and Kubernetes (see Spike result). Task 1.1 was a spike gate on Docker and
   Kubernetes (kill the client mid-turn, assert the process lives). If `setsid` is not enough,
   the fallbacks are `nohup` with `disown`, or starting the launcher through the container's init;
