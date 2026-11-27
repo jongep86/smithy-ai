@@ -1,0 +1,63 @@
+# One Sandbox shaped like the ones SandboxRuntime creates, without the run's
+# environment, so `smithy-init` is replaced by a sleep. Apply, exec into it,
+# suspend it, delete it; see README.md.
+apiVersion: agents.x-k8s.io/v1beta1
+kind: Sandbox
+metadata:
+  name: smoke
+  namespace: smithy-tasks
+  labels:
+    smithy.managed: "true"
+    smithy.ai/container-id: smoke
+  annotations:
+    smithy.ai/container-name: smoke
+spec:
+  service: false
+  operatingMode: Running
+  volumeClaimTemplates:
+    - metadata:
+        name: task
+        labels:
+          smithy.managed: "true"
+          smithy.ai/container-id: smoke
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests:
+            storage: 1Gi
+  podTemplate:
+    metadata:
+      labels:
+        smithy.managed: "true"
+        smithy.ai/container-id: smoke
+      annotations:
+        smithy.ai/container-name: smoke
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 5
+      initContainers:
+        - name: seed-root
+          image: ghcr.io/smithy-ai/claude-task-default:dev
+          command:
+            - sh
+            - -c
+            - |
+              mkdir -p /seed/root /seed/workspace /seed/tmp && chmod 1777 /seed/tmp
+              if [ ! -e /seed/root/.smithy-seeded ]; then
+                cp -a /root/. /seed/root/ && touch /seed/root/.smithy-seeded
+              fi
+          volumeMounts:
+            - {name: task, mountPath: /seed}
+      containers:
+        - name: task
+          image: ghcr.io/smithy-ai/claude-task-default:dev
+          command: [sleep, infinity]
+          workingDir: /workspace
+          resources:
+            requests: {cpu: 100m, memory: 256Mi}
+            limits: {memory: 1Gi}
+          volumeMounts:
+            - {name: task, mountPath: /workspace, subPath: workspace}
+            - {name: task, mountPath: /tmp, subPath: tmp}
+            - {name: task, mountPath: /root, subPath: root}

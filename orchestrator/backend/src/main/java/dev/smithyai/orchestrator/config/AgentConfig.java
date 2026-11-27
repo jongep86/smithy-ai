@@ -21,8 +21,47 @@ public record AgentConfig(ClaudeAgentConfig claude) {
         SecretRef apiKey,
         String turnTimeout,
         String takeoverTimeout,
-        List<String> takeoverTools
+        List<String> takeoverTools,
+        Boolean detached,
+        String pollInterval,
+        Integer lostTurnRetries
     ) {
+        private static final Duration DEFAULT_POLL_INTERVAL = Duration.ofSeconds(20);
+        private static final int DEFAULT_LOST_TURN_RETRIES = 1;
+
+        /** The shape before detached turns. */
+        public ClaudeAgentConfig(
+            String model,
+            SecretRef oauthToken,
+            SecretRef apiKey,
+            String turnTimeout,
+            String takeoverTimeout,
+            List<String> takeoverTools
+        ) {
+            this(model, oauthToken, apiKey, turnTimeout, takeoverTimeout, takeoverTools, null, null, null);
+        }
+
+        /** Whether turns run detached from their exec stream. Off unless set. */
+        public boolean resolvedDetached() {
+            return Boolean.TRUE.equals(detached);
+        }
+
+        /** Longest single observation of a running detached turn; default 20s. */
+        public Duration resolvedPollInterval() {
+            return parse(pollInterval, "pollInterval").orElse(DEFAULT_POLL_INTERVAL);
+        }
+
+        /** Relaunches of a lost detached turn before it fails; default 1. */
+        public int resolvedLostTurnRetries() {
+            if (lostTurnRetries == null) return DEFAULT_LOST_TURN_RETRIES;
+            if (lostTurnRetries < 0) {
+                throw new IllegalStateException(
+                    "agent.claude.lostTurnRetries must not be negative, got " + lostTurnRetries
+                );
+            }
+            return lostTurnRetries;
+        }
+
         /**
          * Tools a human-driven turn may use.
          *

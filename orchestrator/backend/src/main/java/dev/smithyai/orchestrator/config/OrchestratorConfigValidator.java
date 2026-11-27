@@ -21,6 +21,18 @@ final class OrchestratorConfigValidator {
             runtime == null || runtime.docker() == null || runtime.kubernetes() == null,
             "runtime.docker and runtime.kubernetes cannot both be set"
         );
+        if (runtime != null && runtime.kubernetes() != null) {
+            var kubernetes = runtime.kubernetes();
+            require(
+                RuntimeConfig.KubernetesRuntimeConfig.BACKENDS.contains(kubernetes.backend()),
+                "runtime.kubernetes.backend must be one of " + RuntimeConfig.KubernetesRuntimeConfig.BACKENDS
+            );
+            require(
+                kubernetes.failedPodPolicy() == null ||
+                    Set.of("Retain", "Recreate").contains(kubernetes.failedPodPolicy()),
+                "runtime.kubernetes.failedPodPolicy must be Retain or Recreate"
+            );
+        }
         var defaults = config.defaults();
         require(defaults != null, "defaults is required");
         require(defaults.vcs() != null && !defaults.vcs().isBlank(), "defaults.vcs is required");

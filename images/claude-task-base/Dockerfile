@@ -25,5 +25,9 @@ RUN curl -sL "https://dl.gitea.io/tea/latest/tea-linux-${TARGETARCH}" -o /usr/lo
 COPY scripts/ /usr/local/bin/
 RUN chmod +x /usr/local/bin/smithy-*
 
+# Detached Claude turns (agent.claude.detached) start, observe and stop a turn
+# with these; fail the build rather than the first turn if a base change drops one.
+RUN for c in flock setsid timeout head tail; do command -v "$c" >/dev/null || { echo "missing: $c" >&2; exit 1; }; done
+
 WORKDIR /workspace
 CMD ["sleep", "infinity"]

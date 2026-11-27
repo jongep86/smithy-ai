@@ -25,6 +25,15 @@ agent:
     # Budget for a turn a human drove from the dashboard, where someone is
     # waiting on the reply in a browser rather than on a build.
     takeoverTimeout: 5m
+    # Run each turn as a process in the task container that outlives the exec
+    # that started it, so an orchestrator restart does not cost a running turn.
+    # Off by default for now; see docs on detached turns.
+    detached: false
+    # Longest single observation of a running detached turn.
+    pollInterval: 20s
+    # Relaunches (with --resume) of a turn whose process vanished, e.g. with
+    # its pod, before the step fails.
+    lostTurnRetries: 1
     # Tools a human-driven turn may use. Not the stage's list: a definition
     # scopes tools per step to constrain the agent working on its own, which
     # does not map onto whatever a person asks for after taking control.

@@ -112,9 +112,10 @@ public class RunEnvironments {
     public ClaudeSession agent(Run run, List<String> tools) {
         var session = container(run);
         String existing = session.getState().sessionId();
-        var agent = existing != null
-            ? new ClaudeSession(session, tools, existing, knowledgebaseConfig)
-            : new ClaudeSession(session, tools, knowledgebaseConfig);
+        var agent =
+            existing != null
+                ? new ClaudeSession(session, tools, existing, knowledgebaseConfig)
+                : new ClaudeSession(session, tools, knowledgebaseConfig);
         agent.setAddDirs(session.getState().extraDirs());
         return agent;
     }
@@ -140,6 +141,16 @@ public class RunEnvironments {
 
     public void destroyContainer(Run run) {
         findContainer(run).ifPresent(session -> {
+            // A detached turn is stopped on purpose, not left to die with the
+            // container: on Docker the CLI would otherwise get no SIGTERM at all
+            // if removal failed, and the turn would keep spending.
+            if (ClaudeSession.detachedSettings().enabled()) {
+                try {
+                    ClaudeSession.cancelActiveTurn(session);
+                } catch (RuntimeException e) {
+                    log.warn("Could not stop the Claude turn on {} before removing it", session.getContainerName(), e);
+                }
+            }
             session.destroy();
             store.detachEnvironment(RunEnvironment.CONTAINER, session.getContainerName());
             log.info("Run {} released container {}", run.id(), session.getContainerName());
